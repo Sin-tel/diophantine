@@ -1,81 +1,11 @@
 use crate::Matrix;
 
-fn get_pivot(a: &Matrix<i64>, i1: usize, j: usize) -> Option<usize> {
-    (i1..a.len())
-        .filter(|i| a[*i][j] != 0)
-        .min_by_key(|&i| a[i][j].abs())
-}
-
 /// Computes the Hermite Normal Form of an integer matrix.
 /// Returns the HNF basis.
 pub fn hnf(basis: &Matrix<i64>) -> Result<Matrix<i64>, String> {
-    let mut a = basis.clone();
-
-    let n = a.len();
-    if n == 0 {
-        return Ok(vec![]);
-    }
-    let m = a[0].len();
-
-    let mut si = 0;
-    let mut sj = 0;
-
-    while si < n && sj < m {
-        match get_pivot(&a, si, sj) {
-            None => {
-                sj += 1;
-            }
-            Some(row) => {
-                if row != si {
-                    a.swap(si, row);
-                }
-
-                // Eliminate entries below pivot
-                for i in (si + 1)..n {
-                    if a[i][sj] != 0 {
-                        let k = a[i][sj] / a[si][sj];
-                        // Row operation: a[i] -= k * a[si]
-                        for col in 0..m {
-                            let sub_val = k * a[si][col];
-                            a[i][col] -= sub_val;
-                        }
-                    }
-                }
-
-                // Check if column is cleared below pivot
-                let row_done = ((si + 1)..n).all(|i| a[i][sj] == 0);
-
-                if row_done {
-                    // Ensure pivot is positive
-                    if a[si][sj].is_negative() {
-                        for col in 0..m {
-                            a[si][col] = -&a[si][col];
-                        }
-                    }
-
-                    // Eliminate entries above pivot
-                    if a[si][sj] != 0 {
-                        for i in 0..si {
-                            let k = a[i][sj].div_euclid(a[si][sj]);
-                            if k != 0 {
-                                for col in 0..m {
-                                    a[i][col] = k
-                                        .checked_mul(a[si][col])
-                                        .and_then(|val| a[i][col].checked_sub(val))
-                                        .ok_or_else(|| "Overflow in HNF.".to_string())?;
-                                }
-                            }
-                        }
-                    }
-
-                    si += 1;
-                    sj += 1;
-                }
-            }
-        }
-    }
-
-    Ok(a)
+    // TODO: We do some extra work here for U which can be avoided
+    let (h, _) = extended_hnf(basis)?;
+    Ok(h)
 }
 
 /// Computes the Extended Hermite Normal Form of an integer matrix.
