@@ -1,5 +1,32 @@
+use crate::util::vec_sub_assign;
 use crate::Matrix;
-use crate::util::{inner_prod, vec_sub_assign};
+
+pub(crate) fn inner_prod(x: &[f64], y: &[f64], w: &Matrix<f64>) -> f64 {
+    let n = w.len();
+    if n == 0 {
+        return 0.0;
+    }
+    let m = w[0].len();
+    assert_eq!(x.len(), n);
+    assert_eq!(y.len(), m);
+
+    // temp = W * y
+    let mut temp = vec![0.0; n];
+    for i in 0..n {
+        let mut sum = 0.0;
+        for j in 0..m {
+            sum += w[i][j] * y[j];
+        }
+        temp[i] = sum;
+    }
+
+    // result = x dot temp
+    let mut res = 0.0;
+    for i in 0..n {
+        res += x[i] * temp[i];
+    }
+    res
+}
 
 /// Gram-Schmidt Orthogonalization
 fn gramschmidt(v: &Matrix<i64>, w: &Matrix<f64>) -> Matrix<f64> {
@@ -46,7 +73,11 @@ fn mu(basis: &Matrix<i64>, ortho: &Matrix<f64>, w: &Matrix<f64>, i: usize, j: us
     let num = inner_prod(a, &b, w);
     let den = inner_prod(a, a, w);
 
-    if den.abs() < 1e-9 { 0.0 } else { num / den }
+    if den.abs() < 1e-9 {
+        0.0
+    } else {
+        num / den
+    }
 }
 
 /// LLL Lattice Reduction

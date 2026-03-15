@@ -59,33 +59,6 @@ pub fn pretty_print<T: Display>(matrix: &Matrix<T>) {
     }
 }
 
-pub(crate) fn inner_prod(x: &[f64], y: &[f64], w: &Matrix<f64>) -> f64 {
-    let n = w.len();
-    if n == 0 {
-        return 0.0;
-    }
-    let m = w[0].len();
-    assert_eq!(x.len(), n);
-    assert_eq!(y.len(), m);
-
-    // Temp = W * y
-    let mut temp = vec![0.0; n];
-    for i in 0..n {
-        let mut sum = 0.0;
-        for j in 0..m {
-            sum += w[i][j] * y[j];
-        }
-        temp[i] = sum;
-    }
-
-    // Result = x . Temp
-    let mut res = 0.0;
-    for i in 0..n {
-        res += x[i] * temp[i];
-    }
-    res
-}
-
 /// Subtracts `scale * other` from `target` in place.
 pub(crate) fn vec_sub_assign<T>(target: &mut [T], other: &[T], scale: T)
 where
