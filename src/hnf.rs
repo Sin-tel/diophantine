@@ -1,7 +1,10 @@
 //! Row-style Hermite Normal Form (HNF) calculation.
 
-use crate::error::OverflowError;
+use crate::solve_diophantine;
+use crate::integer_det;
+use crate::util::transpose;
 use crate::Matrix;
+use crate::error::OverflowError;
 
 /// Computes the Hermite Normal Form of an integer matrix.
 ///
@@ -106,6 +109,62 @@ pub fn extended_hnf(basis: &Matrix<i64>) -> Result<(Matrix<i64>, Matrix<i64>), O
     Ok((a, u))
 }
 
+/// Computes the saturation of the lattice spanned by the columns of a matrix.
+///
+/// Returns the Hermite Normal Form of the saturated basis.
+///
+/// This process "saturates" the lattice, effectively "filling in the gaps".
+/// Mathematically, saturation finds a basis for all integer vectors that can be
+/// expressed as a rational linear combination of the columns of the input matrix `m`.
+/// It computes a basis for the intersection of the rational span of the columns
+/// with the integer grid Z^n.
+///
+/// This is useful for finding the most "primitive" integer basis that spans the same
+/// rational vector space as the input matrix. It has the effect of removing the
+/// torsion part of the cokernel of the linear map represented by `m`.
+///
+/// # Example
+/// Consider the matrix `M = [[2, 2], [0, 2]]`. The lattice it generates consists
+/// of integer vectors `(2x+2y, 2y)`. The rational span of its columns is all of Q^2.
+/// The integer vectors within this full rational span are simply Z^2. Therefore, the
+/// saturation is the basis for Z^2, which is the identity matrix `[[1, 0], [0, 1]]`.
+///
+/// # Reference
+/// Clément Pernet and William Stein.
+///
+/// Fast Computation of HNF of Random Integer Matrices (section 8).
+/// Journal of Number Theory.
+///
+/// <https://doi.org/10.1016/j.jnt.2010.01.017>
+pub fn saturation(m: &Matrix<i64>) -> Result<Matrix<i64>, String> {
+    if m.is_empty() {
+        return Ok(vec![]);
+    }
+    let r = m.len();
+
+    // Compute K, the HNF basis of the column space of M.
+    let mt = transpose(m);
+    let hnf_mt = hnf(&mt)?;
+    // We only need the first `r` rows, as the image can have at most rank `r`.
+    let k_t = hnf_mt.iter().take(r).cloned().collect();
+    let k = transpose(&k_t);
+
+    // If det(K) is 1, the map is already surjective onto its image basis.
+    // The standard HNF is sufficient.
+    if let Ok(det) = integer_det(&k)
+        && det.abs() == 1
+    {
+        return Ok(hnf(m)?);
+    }
+
+    // Project M onto the basis K by solving KD = M for D.
+    // This is the saturation step.
+    let d = solve_diophantine(&k, m)?;
+
+    // The result is the HNF of this saturated matrix D.
+    Ok(hnf(&d)?)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -158,4 +217,24 @@ mod tests {
         let ua = matmul(&u, &a).unwrap();
         assert_eq!(ua, h);
     }
+
+    #[test]
+    fn test_saturation() {
+        // This matrix represents a map from Z^2 -> Z^2 whose image is the
+        // lattice spanned by [2,0] and [0,2], but M itself is not in HNF.
+        // M = [[2, 2],
+        //      [0, 2]]
+        let m = vec![vec![2, 2], vec![0, 2]];
+
+        // The standard HNF is [[2, 0], [0, 2]].
+        let standard_hnf = hnf(&m).unwrap();
+        assert_eq!(standard_hnf, vec![vec![2, 0], vec![0, 2]]);
+
+        // The saturated HNF should be the identity matrix, since
+        // the rational span is Q^2, and the intersection with Z^2
+        // is Z^2 itself.
+        let saturated = saturation(&m).unwrap();
+        assert_eq!(saturated, vec![vec![1, 0], vec![0, 1]]);
+    }
+
 }

@@ -2,6 +2,8 @@
 
 #[cfg(test)]
 mod proptests {
+    use crate::hnf::saturation;
+    use crate::solve_diophantine;
     use crate::util::{eye, matmul};
     use crate::{
         extended_hnf, hnf, integer_det, integer_inverse, left_kernel, right_kernel, Matrix,
@@ -18,6 +20,30 @@ mod proptests {
             cols in 1usize..=6,
         )(mat in matrix(rows, cols, 1000)) -> Matrix<i64> {
             mat
+        }
+    }
+
+    prop_compose! {
+        fn random_two_square()(
+            n in 1usize..=6,
+        )(
+            a in matrix(n, n, 100),
+            b in matrix(n, n, 100),
+        ) -> (Matrix<i64>, Matrix<i64>) {
+            (a, b)
+        }
+    }
+
+    prop_compose! {
+        fn random_matmul_pair()(
+            n in 1usize..=6,
+            a_rows in 1usize..=6,
+            b_cols in 1usize..=6,
+        )(
+            a in matrix(a_rows, n, 100),
+            b in matrix(n, b_cols, 100),
+        ) -> (Matrix<i64>, Matrix<i64>) {
+            (a, b)
         }
     }
 
@@ -129,6 +155,17 @@ mod proptests {
         }
     }
 
+    fn remove_zero_rows(mat: &Matrix<i64>) -> Matrix<i64> {
+        let mut res = Vec::new();
+
+        for (i, row) in mat.iter().enumerate() {
+            if row.iter().any(|&val| val != 0) {
+                res.push(mat[i].clone());
+            }
+        }
+        res
+    }
+
     proptest! {
         #![proptest_config(ProptestConfig::with_cases(10_000))]
 
@@ -208,10 +245,7 @@ mod proptests {
         }
 
         #[test]
-        fn determinant_multiplicativity(
-            a in matrix(4, 4, 100),
-            b in matrix(4, 4, 100)
-        ) {
+        fn determinant_multiplicativity((a, b) in random_two_square()) {
             // det(A * B) == det(A) * det(B)
             let ab = matmul(&a, &b).unwrap();
 
@@ -223,5 +257,56 @@ mod proptests {
                 prop_assert_eq!(det_a * det_b, det_ab);
             }
         }
+
+        // #[test]
+        // fn diophantine_solve((a, x) in random_matmul_pair()) {
+        //     let b = matmul(&a, &x).unwrap();
+        //     if let Ok(x_sol) = solve_diophantine(&a, &b) {
+        //         let b_check = matmul(&a, &x_sol).unwrap();
+        //         prop_assert_eq!(b, b_check);
+        //     }
+        // }
+
+
+        #[test]
+        fn diophantine_solve((a, x) in random_matmul_pair()) {
+            let b = matmul(&a, &x).unwrap();
+
+            let x_sol = solve_diophantine(&a, &b);
+            prop_assert!(x_sol.is_ok(), "Solver rejected a solvable system: {:?}", x_sol);
+
+            let b_check = matmul(&a, &x_sol.unwrap()).unwrap();
+            prop_assert_eq!(b, b_check);
+        }
+
+
+        #[test]
+        fn test_saturation_via_double_kernel(mat in random_matrix()) {
+            // The kernel of a homomorphism is always a saturated (torsion-free) submodule.
+            // Thus, the saturation of a matrix A should be equivalent to
+            // the right kernel of the left kernel of A.
+
+            // Calculate the saturation directly
+            let saturation_direct = saturation(&mat);
+
+
+            // Calculate it via the double kernel trick.
+            let saturation_dual = (|| {
+                let ker = right_kernel(&mat)?;
+                let basis = left_kernel(&ker)?;
+                hnf(&basis)
+            })();
+
+            if let (Ok(sat1), Ok(sat2)) = (saturation_direct, saturation_dual) {
+                // This doesn't always work: sat2 is empty if the basis is identity.
+                // We also need to remove zero rows from the direct saturation
+                // since those will get removed by the kernel calculation.
+
+                if !sat2.is_empty() {
+                    prop_assert_eq!(remove_zero_rows(&sat1), sat2, "Direct saturation did not match double kernel method");
+                }
+            }
+        }
+
     }
 }

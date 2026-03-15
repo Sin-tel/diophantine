@@ -183,6 +183,117 @@ pub fn right_kernel(basis: &Matrix<i64>) -> Result<Matrix<i64>, OverflowError> {
     Ok(transpose(&res))
 }
 
+// Helper to augment two matrices [A | B]
+fn augment(a: &Matrix<i64>, b: &Matrix<i64>) -> Result<Matrix<i64>, String> {
+    if a.is_empty() {
+        return Ok(b.clone());
+    }
+    if a.len() != b.len() {
+        return Err("Matrices must have the same number of rows to augment.".to_string());
+    }
+
+    let a_rows = a.len();
+    let a_cols = a[0].len();
+    let b_cols = if b[0].is_empty() { 0 } else { b[0].len() };
+
+    let mut aug = vec![vec![0; a_cols + b_cols]; a_rows];
+    for i in 0..a_rows {
+        for j in 0..a_cols {
+            aug[i][j] = a[i][j];
+        }
+        for j in 0..b_cols {
+            aug[i][a_cols + j] = b[i][j];
+        }
+    }
+    Ok(aug)
+}
+
+/// Solves the linear diophantine system AX = B for an integer matrix X.
+///
+/// Returns an integer matrix X that is a particular solution to the system.
+/// Returns an error if no integer solution exists.
+pub fn solve_diophantine(a: &Matrix<i64>, b: &Matrix<i64>) -> Result<Matrix<i64>, String> {
+    // TODO: fix error type
+    if a.is_empty() {
+        return if b.is_empty() {
+            Ok(vec![])
+        } else {
+            Err("No solution for non-empty B and empty A".to_string())
+        };
+    }
+    if a.len() != b.len() {
+        return Err("A and B must have the same number of rows.".to_string());
+    }
+
+    let a_cols = a[0].len();
+    let b_cols = if b[0].is_empty() { 0 } else { b[0].len() };
+
+    // Form the augmented matrix H = hnf([A | B])
+    let aug = augment(a, b)?;
+    let h = hnf(&aug)?;
+
+    // Check for solvability.
+    // A solution exists iff rank(A) == rank([A|B]).
+    // In HNF form, this means any row that is zero in the 'A' part
+    // must also be zero in the 'B' part.
+    for i in 0..h.len() {
+        let a_part_is_zero = (0..a_cols).all(|j| h[i][j] == 0);
+        if a_part_is_zero {
+            let b_part_is_nonzero = (a_cols..(a_cols + b_cols)).any(|j| h[i][j] != 0);
+            if b_part_is_nonzero {
+                return Err("System has no integer solution (is inconsistent).".to_string());
+            }
+        }
+    }
+
+    let m = a.len();
+    // Extract the upper-triangular system K*X = S
+    // K is the HNF of A, S is the transformed B part.
+    let mut k_mat = vec![vec![0; a_cols]; m];
+    let mut s_mat = vec![vec![0; b_cols]; m];
+
+    for i in 0..m {
+        for j in 0..a_cols {
+            k_mat[i][j] = h[i][j];
+        }
+        for j in 0..b_cols {
+            s_mat[i][j] = h[i][a_cols + j];
+        }
+    }
+
+    // Find the pivot column of each row (first nonzero entry).
+    let pivot_col: Vec<Option<usize>> = (0..m)
+        .map(|i| (0..a_cols).find(|&j| k_mat[i][j] != 0))
+        .collect();
+
+    let mut sol = vec![vec![0i64; b_cols]; a_cols];
+
+    for j in 0..b_cols {
+        for i in (0..m).rev() {
+            let Some(pc) = pivot_col[i] else {
+                // zero row
+                continue;
+            };
+            let pivot = k_mat[i][pc];
+
+            let mut rhs = s_mat[i][j];
+            for l in (pc + 1)..a_cols {
+                rhs -= k_mat[i][l] * sol[l][j];
+            }
+
+            if rhs % pivot != 0 {
+                return Err(format!(
+                    "System has no integer solution (failed at row {}).",
+                    i
+                ));
+            }
+            sol[pc][j] = rhs / pivot;
+        }
+    }
+
+    Ok(sol)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -308,5 +419,28 @@ mod tests {
         let a = vec![vec![1, 0], vec![0, 1]];
         let ker = left_kernel(&a).unwrap();
         assert!(ker.is_empty());
+    }
+
+    #[test]
+    fn test_solve_diophantine_simple() {
+        // 2x + 3y = 8
+        // 4x +  y = 6
+        // Solution: x=1, y=2
+        let a = vec![vec![2, 3], vec![4, 1]];
+        let b = vec![vec![8], vec![6]];
+        let x = solve_diophantine(&a, &b).unwrap();
+        assert_eq!(x, vec![vec![1], vec![2]]);
+
+        // Verify that A*X = B
+        assert_eq!(matmul(&a, &x).unwrap(), b);
+    }
+
+    #[test]
+    fn test_solve_diophantine_inconsistent() {
+        // 2x = 1
+        let a = vec![vec![2]];
+        let b = vec![vec![1]];
+        let res = solve_diophantine(&a, &b);
+        assert!(res.is_err());
     }
 }
