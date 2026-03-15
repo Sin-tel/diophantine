@@ -12,6 +12,12 @@ impl fmt::Display for OverflowError {
     }
 }
 
+impl From<OverflowError> for String {
+    fn from(e: OverflowError) -> String {
+        format!("{}", e)
+    }
+}
+
 /// Error type for matrix operations.
 #[derive(Debug, Clone, PartialEq)]
 pub enum MatrixError {
@@ -45,5 +51,11 @@ impl fmt::Display for MatrixError {
                 )
             }
         }
+    }
+}
+
+impl From<MatrixError> for String {
+    fn from(e: MatrixError) -> String {
+        format!("{}", e)
     }
 }
