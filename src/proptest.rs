@@ -1,3 +1,5 @@
+// TODO: Also test LLL conditions
+
 #[cfg(test)]
 mod proptests {
     use crate::util::{eye, matmul};

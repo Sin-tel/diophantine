@@ -1,8 +1,12 @@
+//! Utility functions.
+
 use crate::Matrix;
+use crate::MatrixError;
 use num_traits::{One, Zero};
 use std::fmt::Display;
 use std::ops::SubAssign;
 
+/// Creates an identity matrix of size `n`.
 pub fn eye<T>(n: usize) -> Matrix<T>
 where
     T: One + Zero + Copy,
@@ -14,6 +18,7 @@ where
     m
 }
 
+/// Pretty print a matrix with alignment.
 pub fn pretty_print<T: Display>(matrix: &Matrix<T>) {
     if matrix.is_empty() {
         println!("[[]]");
@@ -70,8 +75,9 @@ where
 }
 
 /// Multiplies two integer matrices (A * B).
+///
 /// Returns an error if the dimensions do not match or if an integer overflow occurs.
-pub fn matmul(a: &Matrix<i64>, b: &Matrix<i64>) -> Result<Matrix<i64>, String> {
+pub fn matmul(a: &Matrix<i64>, b: &Matrix<i64>) -> Result<Matrix<i64>, MatrixError> {
     let a_rows = a.len();
     if a_rows == 0 {
         return Ok(vec![]);
@@ -85,10 +91,7 @@ pub fn matmul(a: &Matrix<i64>, b: &Matrix<i64>) -> Result<Matrix<i64>, String> {
     let b_cols = b[0].len();
 
     if a_cols != b_rows {
-        return Err(format!(
-            "Dimension mismatch: cannot multiply {}x{} by {}x{}",
-            a_rows, a_cols, b_rows, b_cols
-        ));
+        return Err(MatrixError::Dimension((a_rows, a_cols), (b_rows, b_cols)));
     }
 
     let mut result = vec![vec![0; b_cols]; a_rows];
@@ -97,13 +100,9 @@ pub fn matmul(a: &Matrix<i64>, b: &Matrix<i64>) -> Result<Matrix<i64>, String> {
         for j in 0..b_cols {
             let mut sum: i64 = 0;
             for k in 0..a_cols {
-                let term = a[i][k]
-                    .checked_mul(b[k][j])
-                    .ok_or_else(|| "Overflow during matrix multiplication".to_string())?;
+                let term = a[i][k].checked_mul(b[k][j]).ok_or(MatrixError::Overflow)?;
 
-                sum = sum
-                    .checked_add(term)
-                    .ok_or_else(|| "Overflow during matrix multiplication".to_string())?;
+                sum = sum.checked_add(term).ok_or(MatrixError::Overflow)?;
             }
             result[i][j] = sum;
         }
@@ -112,7 +111,7 @@ pub fn matmul(a: &Matrix<i64>, b: &Matrix<i64>) -> Result<Matrix<i64>, String> {
     Ok(result)
 }
 
-/// Helper to transpose a matrix
+/// Return matrix transpose.
 pub fn transpose(matrix: &Matrix<i64>) -> Matrix<i64> {
     if matrix.is_empty() {
         return vec![];

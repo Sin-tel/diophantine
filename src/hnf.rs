@@ -1,17 +1,22 @@
+//! Row-style Hermite Normal Form (HNF) calculation.
+
+use crate::error::OverflowError;
 use crate::Matrix;
 
 /// Computes the Hermite Normal Form of an integer matrix.
+///
 /// Returns the HNF basis.
-pub fn hnf(basis: &Matrix<i64>) -> Result<Matrix<i64>, String> {
+pub fn hnf(basis: &Matrix<i64>) -> Result<Matrix<i64>, OverflowError> {
     // TODO: We do some extra work here for U which can be avoided
     let (h, _) = extended_hnf(basis)?;
     Ok(h)
 }
 
 /// Computes the Extended Hermite Normal Form of an integer matrix.
+///
 /// Returns a tuple `(H, U)` where `H` is the HNF and `U` is the unimodular
 /// transformation matrix such that `U * A = H`.
-pub fn extended_hnf(basis: &Matrix<i64>) -> Result<(Matrix<i64>, Matrix<i64>), String> {
+pub fn extended_hnf(basis: &Matrix<i64>) -> Result<(Matrix<i64>, Matrix<i64>), OverflowError> {
     let mut a = basis.clone();
     let n = a.len();
     if n == 0 {
@@ -79,13 +84,13 @@ pub fn extended_hnf(basis: &Matrix<i64>) -> Result<(Matrix<i64>, Matrix<i64>), S
                                     a[i][col] = k
                                         .checked_mul(a[si][col])
                                         .and_then(|val| a[i][col].checked_sub(val))
-                                        .ok_or_else(|| "Overflow in HNF.".to_string())?;
+                                        .ok_or(OverflowError {})?;
                                 }
                                 for col in 0..n {
                                     u[i][col] = k
                                         .checked_mul(u[si][col])
                                         .and_then(|val| u[i][col].checked_sub(val))
-                                        .ok_or_else(|| "Overflow in HNF.".to_string())?;
+                                        .ok_or(OverflowError {})?;
                                 }
                             }
                         }

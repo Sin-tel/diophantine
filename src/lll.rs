@@ -1,3 +1,7 @@
+//! Lenstra–Lenstra–Lovász (LLL) lattice basis reduction algorithm and related functions.
+//!
+//! Uses `f64` for calculations, so the results are not exact.
+
 use crate::util::vec_sub_assign;
 use crate::Matrix;
 
@@ -64,7 +68,7 @@ fn gramschmidt(v: &Matrix<i64>, w: &Matrix<f64>) -> Matrix<f64> {
     u
 }
 
-/// Helper for LLL: Calculate mu coefficient
+// Helper for LLL: Calculate mu coefficient
 fn mu(basis: &Matrix<i64>, ortho: &Matrix<f64>, w: &Matrix<f64>, i: usize, j: usize) -> f64 {
     let a = &ortho[j];
     // Convert basis row to f64 on the fly for calculation
@@ -80,7 +84,7 @@ fn mu(basis: &Matrix<i64>, ortho: &Matrix<f64>, w: &Matrix<f64>, i: usize, j: us
     }
 }
 
-/// LLL Lattice Reduction
+/// LLL reduction
 ///
 /// # Arguments
 /// * `basis` - The lattice basis (row vectors).
@@ -135,7 +139,13 @@ pub fn lll(basis: &Matrix<i64>, delta: f64, w: &Matrix<f64>) -> Matrix<i64> {
     basis
 }
 
-/// Babai's Nearest Plane Algorithm for approximate CVP
+/// Babai's Nearest Plane Algorithm for approximate CVP.
+/// The basis should be LLL-reduced first.
+///
+/// # Arguments
+/// * `v`     - The query vector.
+/// * `delta` - The reduction parameter (typically 0.75 or 0.99).
+/// * `w` - The quadratic form matrix (weights). Pass Identity matrix for standard Euclidean.
 pub fn nearest_plane(v: &[i64], basis: &Matrix<i64>, w: &Matrix<f64>) -> Vec<i64> {
     let mut b = v.to_vec();
     let n = basis.len(); // number of rows

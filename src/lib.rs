@@ -1,32 +1,44 @@
+//! Tools for calculations over lattices, which mostly comes down to doing linear algebra over the integers.
+//!
+//! This crate is not intended for cryptographic applications. We use `i64` internally for all calculations, so use only for relatively small numbers and dimensions.
+//! All internal overflows are caught using checked ops and returned as errors, so there should not be any issues with silently wrong results in release mode.
+
 // This lint tends to reduce clarity for loops over matrices
 #![allow(clippy::needless_range_loop)]
+#![warn(missing_docs)]
+#![warn(missing_debug_implementations)]
+#![warn(rust_2018_idioms)]
+#![warn(clippy::cast_lossless)]
 
+pub mod error;
 pub mod hnf;
 pub mod lll;
-pub mod proptest;
+mod proptest;
 pub mod util;
 
+use crate::error::{MatrixError, OverflowError};
 use crate::hnf::extended_hnf;
 pub use crate::hnf::hnf;
 use crate::util::transpose;
 
-/// Type alias for a Matrix (Row-major)
+/// Type alias for a Matrix (row-major)
 pub type Matrix<T> = Vec<Vec<T>>;
 
-/// Helper to prevent overflow during Bareiss step
+// Helper to prevent overflow during Bareiss step
 fn checked_bareiss_op(a: &Matrix<i64>, i: usize, j: usize, k: usize) -> Option<i64> {
     let term1 = a[j][k].checked_mul(a[i][i])?;
     let term2 = a[j][i].checked_mul(a[i][k])?;
     term1.checked_sub(term2)
 }
 
-pub fn integer_det(basis: &Matrix<i64>) -> Result<i64, String> {
+/// Calculates the exact integer determinant of `basis`.
+pub fn integer_det(basis: &Matrix<i64>) -> Result<i64, MatrixError> {
     let n = basis.len();
     if n == 0 {
-        return Err("Matrix empty".to_string());
+        return Err(MatrixError::Empty);
     }
     if basis[0].len() != n {
-        return Err("Matrix must be square".to_string());
+        return Err(MatrixError::NotSquare);
     }
 
     let mut a = basis.clone();
@@ -51,7 +63,7 @@ pub fn integer_det(basis: &Matrix<i64>) -> Result<i64, String> {
                 let d = checked_bareiss_op(&a, i, j, k);
                 match d {
                     Some(val) => a[j][k] = val / prev,
-                    None => return Err("Overflow error during determinant calculation".to_string()),
+                    None => return Err(MatrixError::Overflow),
                 }
             }
         }
@@ -62,14 +74,15 @@ pub fn integer_det(basis: &Matrix<i64>) -> Result<i64, String> {
 }
 
 /// Computes the integer inverse of a square matrix if it exists.
-/// A matrix has an integer inverse if and only if it is unimodular (determinant is ±1).
-pub fn integer_inverse(basis: &Matrix<i64>) -> Result<Matrix<i64>, String> {
+///
+/// A matrix has an integer inverse if and only if it is square and unimodular (determinant is ±1).
+pub fn integer_inverse(basis: &Matrix<i64>) -> Result<Matrix<i64>, MatrixError> {
     let n = basis.len();
     if n == 0 {
         return Ok(vec![]);
     }
     if basis[0].len() != n {
-        return Err("Matrix must be square".to_string());
+        return Err(MatrixError::NotSquare);
     }
 
     // Create an augmented matrix [A | I]
@@ -94,7 +107,7 @@ pub fn integer_inverse(basis: &Matrix<i64>) -> Result<Matrix<i64>, String> {
                     a.swap(i, r);
                     sign *= -1;
                 }
-                None => return Err("Matrix is singular".to_string()),
+                None => return Err(MatrixError::Singular),
             }
         }
 
@@ -109,9 +122,9 @@ pub fn integer_inverse(basis: &Matrix<i64>) -> Result<Matrix<i64>, String> {
                 match (term1, term2) {
                     (Some(t1), Some(t2)) => match t1.checked_sub(t2) {
                         Some(diff) => a[j][k] = diff / prev, // Guaranteed to be exact division
-                        None => return Err("Overflow error during inverse calculation".to_string()),
+                        None => return Err(MatrixError::Overflow),
                     },
-                    _ => return Err("Overflow error during inverse calculation".to_string()),
+                    _ => return Err(MatrixError::Overflow),
                 }
             }
         }
@@ -127,7 +140,7 @@ pub fn integer_inverse(basis: &Matrix<i64>) -> Result<Matrix<i64>, String> {
 
     let det = sign * a[n - 1][n - 1];
     if det.abs() != 1 {
-        return Err(format!("Matrix is not unimodular (det = {})", det));
+        return Err(MatrixError::NotUnimodular(det));
     }
 
     // Extract the exact inverse from the right half of the augmented matrix.
@@ -146,8 +159,9 @@ pub fn integer_inverse(basis: &Matrix<i64>) -> Result<Matrix<i64>, String> {
 }
 
 /// Computes the left kernel of an integer matrix.
+///
 /// Returns a basis of row vectors `x` such that `x * A = 0`.
-pub fn left_kernel(basis: &Matrix<i64>) -> Result<Matrix<i64>, String> {
+pub fn left_kernel(basis: &Matrix<i64>) -> Result<Matrix<i64>, OverflowError> {
     let (h, u) = extended_hnf(basis)?;
     let mut kernel = Vec::new();
 
@@ -161,8 +175,9 @@ pub fn left_kernel(basis: &Matrix<i64>) -> Result<Matrix<i64>, String> {
 }
 
 /// Computes the right kernel (nullspace) of an integer matrix.
+///
 /// Returns a basis of row vectors `x` such that `A * x = 0`.
-pub fn right_kernel(basis: &Matrix<i64>) -> Result<Matrix<i64>, String> {
+pub fn right_kernel(basis: &Matrix<i64>) -> Result<Matrix<i64>, OverflowError> {
     let t = transpose(basis);
     let res = left_kernel(&t)?;
     Ok(transpose(&res))
@@ -237,7 +252,7 @@ mod tests {
         let m = vec![vec![2, 0], vec![0, 1]];
         let res = integer_inverse(&m);
         assert!(res.is_err());
-        assert!(res.unwrap_err().contains("not unimodular"));
+        assert!(res.unwrap_err() == MatrixError::NotUnimodular(2));
     }
 
     #[test]
