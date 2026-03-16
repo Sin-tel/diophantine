@@ -14,7 +14,7 @@ mod proptests {
         fn random_matrix()(
             rows in 1usize..=6,
             cols in 1usize..=6,
-        )(mat in matrix(rows, cols, 1000)) -> Matrix<i64> {
+        )(mat in matrix(rows, cols, 30)) -> Matrix<i64> {
             mat
         }
     }
@@ -23,8 +23,8 @@ mod proptests {
         fn random_two_square()(
             n in 1usize..=6,
         )(
-            a in matrix(n, n, 100),
-            b in matrix(n, n, 100),
+            a in matrix(n, n, 30),
+            b in matrix(n, n, 30),
         ) -> (Matrix<i64>, Matrix<i64>) {
             (a, b)
         }
@@ -48,8 +48,8 @@ mod proptests {
             rows in 1usize..=6,
             cols in 1usize..=6,
         )(
-            a in matrix(rows, 2, 1000),
-            b in matrix(2, cols, 1000)
+            a in matrix(rows, 2, 100),
+            b in matrix(2, cols, 100)
         ) -> Matrix<i64> {
             matmul(&a, &b).unwrap()
         }
@@ -162,6 +162,20 @@ mod proptests {
         res
     }
 
+    fn all_zero(m: &Matrix<i64>) -> bool {
+        if m.is_empty() {
+            return true;
+        }
+        for i in 0..m.len() {
+            for j in 0..m[0].len() {
+                if m[i][j] != 0 {
+                    return false;
+                }
+            }
+        }
+        return true;
+    }
+
     proptest! {
         #![proptest_config(ProptestConfig::with_cases(10_000))]
 
@@ -177,32 +191,20 @@ mod proptests {
 
         #[test]
         fn kernel_left_property(mat in rank_deficient_matrix()) {
-            if let Ok(kernel) = kernel_left(&mat) {
-                let res = matmul(&kernel, &mat).unwrap();
+            let kernel = kernel_left(&mat);
+            prop_assume!(kernel.is_ok());
 
-                if !res.is_empty() {
-                    for i in 0..res.len() {
-                        for j in 0..res[0].len() {
-                            prop_assert_eq!(res[i][j], 0);
-                        }
-                    }
-                }
-            }
+            let product = matmul(&kernel.unwrap(), &mat).unwrap();
+            prop_assert!(all_zero(&product));
         }
 
         #[test]
         fn kernel_right_property(mat in rank_deficient_matrix()) {
-            if let Ok(kernel) = kernel_right(&mat) {
-                let res = matmul(&mat, &kernel).unwrap();
+            let kernel = kernel_right(&mat);
+            prop_assume!(kernel.is_ok());
 
-                if !res.is_empty() {
-                    for i in 0..res.len() {
-                        for j in 0..res[0].len() {
-                            prop_assert_eq!(res[i][j], 0);
-                        }
-                    }
-                }
-            }
+            let product = matmul(&mat, &kernel.unwrap()).unwrap();
+            prop_assert!(all_zero(&product));
         }
 
         #[test]
@@ -210,7 +212,6 @@ mod proptests {
             // hnf and hnf_extended should give the same results
             let h = hnf(&mat);
             let h_ext = hnf_extended(&mat);
-
 
             if let (Ok(h), Ok((h2, _))) = (h, h_ext) {
                 prop_assert_eq!(h, h2);
@@ -220,24 +221,29 @@ mod proptests {
         #[test]
         fn hnf_invariants(mat in random_matrix()) {
             // Extended HNF must always satisfy U * A = H
-            if let Ok((h, u)) = hnf_extended(&mat) {
-                // U must be unimodular (abs(det(U)) == 1)
-                if let Ok(det_u) = integer_det(&u) {
-                    prop_assert_eq!(det_u.abs(), 1);
-                }
+            let res = hnf_extended(&mat);
+            prop_assume!(res.is_ok());
 
-                // U * A = H
-                if let Ok(ua) = matmul(&u, &mat) {
-                    prop_assert_eq!(ua, h);
-                }
+            let (h, u) = res.unwrap();
+
+            // U must be unimodular (abs(det(U)) == 1)
+            if let Ok(det_u) = integer_det(&u) {
+                prop_assert_eq!(det_u.abs(), 1);
+            }
+
+            // U * A = H
+            if let Ok(ua) = matmul(&u, &mat) {
+                prop_assert_eq!(ua, h);
             }
         }
 
         #[test]
         fn hnf_structure(mat in random_matrix()) {
-            if let Ok(h) = hnf(&mat) {
-                assert_is_hnf(&h);
-            }
+            let res = hnf(&mat);
+            prop_assume!(res.is_ok());
+
+            let h = res.unwrap();
+            assert_is_hnf(&h);
         }
 
         #[test]

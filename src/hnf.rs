@@ -11,6 +11,38 @@ pub fn hnf(basis: &Matrix<i64>) -> Result<Matrix<i64>, DiophantineError> {
     Ok(h)
 }
 
+#[must_use]
+fn apply_row_operation(
+    a: &mut Matrix<i64>,
+    k: i64,
+
+    i: usize,
+    si: usize,
+) -> Result<(), DiophantineError> {
+    let m = a[0].len();
+
+    for col in 0..m {
+        a[i][col] = k
+            .checked_mul(a[si][col])
+            .and_then(|val| a[i][col].checked_sub(val))
+            .ok_or(DiophantineError::Overflow("Overflow in HNF"))?;
+    }
+
+    Ok(())
+}
+
+#[must_use]
+fn negate_row(a: &mut Matrix<i64>, i: usize) -> Result<(), DiophantineError> {
+    let m = a[0].len();
+    for col in 0..m {
+        a[i][col] = a[i][col]
+            .checked_neg()
+            .ok_or(DiophantineError::Overflow("Overflow in HNF"))?;
+    }
+
+    Ok(())
+}
+
 /// Computes the Extended Hermite Normal Form of an integer matrix.
 ///
 /// Returns a tuple `(H, U)` where `H` is the HNF and `U` is the unimodular
@@ -35,7 +67,7 @@ pub fn hnf_extended(basis: &Matrix<i64>) -> Result<(Matrix<i64>, Matrix<i64>), D
     while si < n && sj < m {
         let pivot_idx = (si..n)
             .filter(|&i| a[i][sj] != 0)
-            .min_by_key(|&i| a[i][sj].abs());
+            .min_by_key(|&i| a[i][sj].checked_abs());
 
         match pivot_idx {
             None => {
@@ -51,12 +83,8 @@ pub fn hnf_extended(basis: &Matrix<i64>) -> Result<(Matrix<i64>, Matrix<i64>), D
                 for i in (si + 1)..n {
                     if a[i][sj] != 0 {
                         let k = a[i][sj] / a[si][sj];
-                        for col in 0..m {
-                            a[i][col] -= k * a[si][col];
-                        }
-                        for col in 0..n {
-                            u[i][col] -= k * u[si][col];
-                        }
+                        apply_row_operation(&mut a, k, i, si)?;
+                        apply_row_operation(&mut u, k, i, si)?;
                     }
                 }
 
@@ -66,12 +94,8 @@ pub fn hnf_extended(basis: &Matrix<i64>) -> Result<(Matrix<i64>, Matrix<i64>), D
                 if row_done {
                     // Ensure pivot is positive
                     if a[si][sj].is_negative() {
-                        for col in 0..m {
-                            a[si][col] = -a[si][col];
-                        }
-                        for col in 0..n {
-                            u[si][col] = -u[si][col];
-                        }
+                        negate_row(&mut a, si)?;
+                        negate_row(&mut u, si)?;
                     }
 
                     // Eliminate entries above pivot
@@ -79,18 +103,8 @@ pub fn hnf_extended(basis: &Matrix<i64>) -> Result<(Matrix<i64>, Matrix<i64>), D
                         for i in 0..si {
                             let k = a[i][sj].div_euclid(a[si][sj]);
                             if k != 0 {
-                                for col in 0..m {
-                                    a[i][col] = k
-                                        .checked_mul(a[si][col])
-                                        .and_then(|val| a[i][col].checked_sub(val))
-                                        .ok_or(DiophantineError::Overflow("Overflow in HNF"))?;
-                                }
-                                for col in 0..n {
-                                    u[i][col] = k
-                                        .checked_mul(u[si][col])
-                                        .and_then(|val| u[i][col].checked_sub(val))
-                                        .ok_or(DiophantineError::Overflow("Overflow in HNF"))?;
-                                }
+                                apply_row_operation(&mut a, k, i, si)?;
+                                apply_row_operation(&mut u, k, i, si)?;
                             }
                         }
                     }
@@ -164,7 +178,7 @@ pub fn saturation(m: &Matrix<i64>) -> Result<Matrix<i64>, DiophantineError> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{matmul, integer_det};
+    use crate::{integer_det, matmul};
 
     #[test]
     fn hnf_simple() {
@@ -232,4 +246,34 @@ mod tests {
         assert_eq!(saturated, vec![vec![1, 0], vec![0, 1]]);
     }
 
+    #[test]
+    fn hnf_bad_input_a() {
+        let basis = vec![vec![2, i64::MAX / 2], vec![i64::MAX, 0]];
+        let res = hnf(&basis);
+        assert!(matches!(res, Err(DiophantineError::Overflow(_))));
+    }
+
+    #[test]
+    fn hnf_bad_input_b() {
+        let basis: Matrix<i64> = vec![vec![10, -i64::MAX / 2], vec![20, i64::MAX / 2 + 1]];
+        let res = hnf(&basis);
+        assert!(matches!(res, Err(DiophantineError::Overflow(_))));
+    }
+
+    #[test]
+    fn hnf_bad_input_c() {
+        let basis: Matrix<i64> = vec![vec![1, 0, 0], vec![0, 2, i64::MAX], vec![0, 4, 1]];
+        let res = hnf(&basis);
+        assert!(matches!(res, Err(DiophantineError::Overflow(_))));
+    }
+
+    #[test]
+    fn hnf_bad_input_d() {
+        // Will trigger overflow in row negation.
+        // This works because i64::MAX is divisible by 7.
+        let basis: Matrix<i64> = vec![vec![1, i64::MAX / 7], vec![7, -1]];
+        let res = hnf(&basis);
+
+        assert!(matches!(res, Err(DiophantineError::Overflow(_))));
+    }
 }
