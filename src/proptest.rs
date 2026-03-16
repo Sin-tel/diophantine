@@ -217,7 +217,7 @@ mod proptests {
             let h_ext = extended_hnf(&mat);
 
 
-            if let (Ok(h), Ok((h2, _))) = (h.clone(), h_ext.clone()) {
+            if let (Ok(h), Ok((h2, _))) = (h, h_ext) {
                 prop_assert_eq!(h, h2);
             }
         }
@@ -267,7 +267,7 @@ mod proptests {
             match solve_diophantine(&a, &b) {
                 Ok(x_sol) => {
                     // Verify A * X_sol == B
-                    // This one may fail because x_check is different but valid solution
+                    // This one may fail because x_check is a different but valid solution.
                     if let Ok(b_check) = matmul(&a, &x_sol) {
                         prop_assert_eq!(b, b_check);
                     }

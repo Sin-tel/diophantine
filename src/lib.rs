@@ -248,6 +248,7 @@ pub fn solve_diophantine(
     let a_cols = a[0].len();
     let b_cols = if b[0].is_empty() { 0 } else { b[0].len() };
 
+    // Get H and U
     let a_t = transpose(a);
     let (h, u) = extended_hnf(&a_t)?;
 
@@ -258,6 +259,7 @@ pub fn solve_diophantine(
         }
     }
 
+    // Substitute to find Y
     let mut y = vec![vec![0i64; b_cols]; a_cols];
 
     for c in 0..b_cols {
@@ -351,10 +353,10 @@ mod tests {
 
     #[test]
     fn integer_inverse_swap() {
-        // det = -1
+        // [[0, 1], [1, 0]] is its own inverse
         let m = vec![vec![0, 1], vec![1, 0]];
         let inv = integer_inverse(&m).unwrap();
-        assert_eq!(inv, vec![vec![0, 1], vec![1, 0]]); // Its own inverse
+        assert_eq!(inv, vec![vec![0, 1], vec![1, 0]]);
     }
 
     #[test]
