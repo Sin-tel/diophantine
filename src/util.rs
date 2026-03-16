@@ -2,7 +2,6 @@
 
 use crate::DiophantineError;
 use crate::Matrix;
-use crate::MatrixError;
 use num_traits::{One, Zero};
 use std::fmt::Display;
 use std::ops::SubAssign;
@@ -78,44 +77,7 @@ where
 /// Multiplies two integer matrices (A * B).
 ///
 /// Returns an error if the dimensions do not match or if an integer overflow occurs.
-pub fn matmul(a: &Matrix<i64>, b: &Matrix<i64>) -> Result<Matrix<i64>, MatrixError> {
-    let a_rows = a.len();
-    if a_rows == 0 {
-        return Ok(vec![]);
-    }
-    let a_cols = a[0].len();
-
-    let b_rows = b.len();
-    if b_rows == 0 {
-        return Ok(vec![]);
-    }
-    let b_cols = b[0].len();
-
-    if a_cols != b_rows {
-        return Err(MatrixError::Dimension((a_rows, a_cols), (b_rows, b_cols)));
-    }
-
-    let mut result = vec![vec![0; b_cols]; a_rows];
-
-    for i in 0..a_rows {
-        for j in 0..b_cols {
-            let mut sum: i64 = 0;
-            for k in 0..a_cols {
-                let term = a[i][k].checked_mul(b[k][j]).ok_or(MatrixError::Overflow)?;
-
-                sum = sum.checked_add(term).ok_or(MatrixError::Overflow)?;
-            }
-            result[i][j] = sum;
-        }
-    }
-
-    Ok(result)
-}
-
-/// Multiplies two integer matrices (A * B).
-///
-/// Returns an error if the dimensions do not match or if an integer overflow occurs.
-pub fn checked_matmul(a: &Matrix<i64>, b: &Matrix<i64>) -> Result<Matrix<i64>, DiophantineError> {
+pub fn matmul(a: &Matrix<i64>, b: &Matrix<i64>) -> Result<Matrix<i64>, DiophantineError> {
     if a.is_empty() || b.is_empty() || b[0].is_empty() {
         return Ok(vec![]);
     }

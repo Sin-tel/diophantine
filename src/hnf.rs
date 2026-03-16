@@ -5,12 +5,11 @@ use crate::solve_diophantine;
 use crate::integer_det;
 use crate::util::transpose;
 use crate::Matrix;
-use crate::error::OverflowError;
 
 /// Computes the Hermite Normal Form of an integer matrix.
 ///
 /// Returns the HNF basis.
-pub fn hnf(basis: &Matrix<i64>) -> Result<Matrix<i64>, OverflowError> {
+pub fn hnf(basis: &Matrix<i64>) -> Result<Matrix<i64>, DiophantineError> {
     // TODO: We do some extra work here for U which can be avoided
     let (h, _) = extended_hnf(basis)?;
     Ok(h)
@@ -20,7 +19,7 @@ pub fn hnf(basis: &Matrix<i64>) -> Result<Matrix<i64>, OverflowError> {
 ///
 /// Returns a tuple `(H, U)` where `H` is the HNF and `U` is the unimodular
 /// transformation matrix such that `U * A = H`.
-pub fn extended_hnf(basis: &Matrix<i64>) -> Result<(Matrix<i64>, Matrix<i64>), OverflowError> {
+pub fn extended_hnf(basis: &Matrix<i64>) -> Result<(Matrix<i64>, Matrix<i64>), DiophantineError> {
     let mut a = basis.clone();
     let n = a.len();
     if n == 0 {
@@ -88,13 +87,13 @@ pub fn extended_hnf(basis: &Matrix<i64>) -> Result<(Matrix<i64>, Matrix<i64>), O
                                     a[i][col] = k
                                         .checked_mul(a[si][col])
                                         .and_then(|val| a[i][col].checked_sub(val))
-                                        .ok_or(OverflowError {})?;
+                                        .ok_or(DiophantineError::Overflow("Overflow in HNF"))?;
                                 }
                                 for col in 0..n {
                                     u[i][col] = k
                                         .checked_mul(u[si][col])
                                         .and_then(|val| u[i][col].checked_sub(val))
-                                        .ok_or(OverflowError {})?;
+                                        .ok_or(DiophantineError::Overflow("Overflow in HNF"))?;
                                 }
                             }
                         }
@@ -145,7 +144,7 @@ pub fn saturation(m: &Matrix<i64>) -> Result<Matrix<i64>, DiophantineError> {
 
     // Compute K, the HNF basis of the column space of M.
     let mt = transpose(m);
-    let hnf_mt = hnf(&mt).map_err(|_| DiophantineError::Overflow("HNF overflow"))?;
+    let hnf_mt = hnf(&mt)?;
     // We only need the first `r` rows, as the image can have at most rank `r`.
     let k_t = hnf_mt.iter().take(r).cloned().collect();
     let k = transpose(&k_t);
@@ -155,7 +154,7 @@ pub fn saturation(m: &Matrix<i64>) -> Result<Matrix<i64>, DiophantineError> {
     if let Ok(det) = integer_det(&k)
         && det.abs() == 1
     {
-        return Ok(hnf(m).map_err(|_| DiophantineError::Overflow("HNF overflow"))?);
+        return Ok(hnf(m)?);
     }
 
     // Project M onto the basis K by solving KD = M for D.
@@ -163,7 +162,7 @@ pub fn saturation(m: &Matrix<i64>) -> Result<Matrix<i64>, DiophantineError> {
     let d = solve_diophantine(&k, m)?;
 
     // The result is the HNF of this saturated matrix D.
-    Ok(hnf(&d).map_err(|_| DiophantineError::Overflow("HNF overflow"))?)
+    Ok(hnf(&d)?)
 }
 
 #[cfg(test)]
