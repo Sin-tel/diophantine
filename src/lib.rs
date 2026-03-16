@@ -16,9 +16,10 @@ pub mod lll;
 mod proptest;
 pub mod util;
 
-use crate::error::{MatrixError, OverflowError};
+use crate::error::{DiophantineError, MatrixError, OverflowError};
 use crate::hnf::extended_hnf;
 pub use crate::hnf::hnf;
+use crate::util::checked_matmul;
 use crate::util::transpose;
 
 /// Type alias for a Matrix (row-major)
@@ -183,115 +184,97 @@ pub fn right_kernel(basis: &Matrix<i64>) -> Result<Matrix<i64>, OverflowError> {
     Ok(transpose(&res))
 }
 
-// Helper to augment two matrices [A | B]
-fn augment(a: &Matrix<i64>, b: &Matrix<i64>) -> Result<Matrix<i64>, String> {
-    if a.is_empty() {
-        return Ok(b.clone());
+/// Helper to compute the partial dot product of a column of H and a column of Y
+fn checked_partial_col_dot(
+    h: &Matrix<i64>,
+    col_h: usize,
+    y: &Matrix<i64>,
+    col_y: usize,
+    limit: usize,
+) -> Result<i64, DiophantineError> {
+    let mut sum = 0i64;
+    for l in 0..limit {
+        let term = h[l][col_h]
+            .checked_mul(y[l][col_y])
+            .ok_or(DiophantineError::Overflow("Overflow in dot product"))?;
+        sum = sum
+            .checked_add(term)
+            .ok_or(DiophantineError::Overflow("Overflow in dot product"))?;
     }
-    if a.len() != b.len() {
-        return Err("Matrices must have the same number of rows to augment.".to_string());
-    }
-
-    let a_rows = a.len();
-    let a_cols = a[0].len();
-    let b_cols = if b[0].is_empty() { 0 } else { b[0].len() };
-
-    let mut aug = vec![vec![0; a_cols + b_cols]; a_rows];
-    for i in 0..a_rows {
-        for j in 0..a_cols {
-            aug[i][j] = a[i][j];
-        }
-        for j in 0..b_cols {
-            aug[i][a_cols + j] = b[i][j];
-        }
-    }
-    Ok(aug)
+    Ok(sum)
 }
 
 /// Solves the linear diophantine system AX = B for an integer matrix X.
 ///
 /// Returns an integer matrix X that is a particular solution to the system.
 /// Returns an error if no integer solution exists.
-pub fn solve_diophantine(a: &Matrix<i64>, b: &Matrix<i64>) -> Result<Matrix<i64>, String> {
-    // TODO: fix error type
+pub fn solve_diophantine(
+    a: &Matrix<i64>,
+    b: &Matrix<i64>,
+) -> Result<Matrix<i64>, DiophantineError> {
     if a.is_empty() {
         return if b.is_empty() {
             Ok(vec![])
         } else {
-            Err("No solution for non-empty B and empty A".to_string())
+            Err(DiophantineError::NoSolution(
+                "No solution for non-empty B and empty A".to_string(),
+            ))
         };
     }
     if a.len() != b.len() {
-        return Err("A and B must have the same number of rows.".to_string());
+        return Err(DiophantineError::InvalidDimensions(
+            "A and B must have the same number of rows.".to_string(),
+        ));
     }
 
+    let a_rows = a.len();
     let a_cols = a[0].len();
     let b_cols = if b[0].is_empty() { 0 } else { b[0].len() };
 
-    // Form the augmented matrix H = hnf([A | B])
-    let aug = augment(a, b)?;
-    let h = hnf(&aug)?;
+    let a_t = transpose(a);
+    let (h, u) = extended_hnf(&a_t).map_err(|_| DiophantineError::Overflow("HNF overflow"))?;
 
-    // Check for solvability.
-    // A solution exists iff rank(A) == rank([A|B]).
-    // In HNF form, this means any row that is zero in the 'A' part
-    // must also be zero in the 'B' part.
-    for i in 0..h.len() {
-        let a_part_is_zero = (0..a_cols).all(|j| h[i][j] == 0);
-        if a_part_is_zero {
-            let b_part_is_nonzero = (a_cols..(a_cols + b_cols)).any(|j| h[i][j] != 0);
-            if b_part_is_nonzero {
-                return Err("System has no integer solution (is inconsistent).".to_string());
+    let mut pivot_row_of_col = vec![None; a_rows];
+    for k in 0..a_cols {
+        if let Some(i) = (0..a_rows).find(|&col| h[k][col] != 0) {
+            pivot_row_of_col[i] = Some(k);
+        }
+    }
+
+    let mut y = vec![vec![0i64; b_cols]; a_cols];
+
+    for c in 0..b_cols {
+        for i in 0..a_rows {
+            match pivot_row_of_col[i] {
+                Some(k) => {
+                    let pivot = h[k][i];
+                    let dot = checked_partial_col_dot(&h, i, &y, c, k)?;
+                    let rhs = b[i][c].checked_sub(dot).ok_or(DiophantineError::Overflow(
+                        "Overflow during back-substitution",
+                    ))?;
+
+                    if rhs % pivot != 0 {
+                        return Err(DiophantineError::NoSolution(format!("Failed at row {}", i)));
+                    }
+                    y[k][c] = rhs / pivot;
+                }
+                None => {
+                    // Equation is redundant, check if it's perfectly consistent
+                    let dot = checked_partial_col_dot(&h, i, &y, c, a_cols)?;
+                    if dot != b[i][c] {
+                        return Err(DiophantineError::NoSolution(format!(
+                            "Inconsistent at row {}",
+                            i
+                        )));
+                    }
+                }
             }
         }
     }
 
-    let m = a.len();
-    // Extract the upper-triangular system K*X = S
-    // K is the HNF of A, S is the transformed B part.
-    let mut k_mat = vec![vec![0; a_cols]; m];
-    let mut s_mat = vec![vec![0; b_cols]; m];
-
-    for i in 0..m {
-        for j in 0..a_cols {
-            k_mat[i][j] = h[i][j];
-        }
-        for j in 0..b_cols {
-            s_mat[i][j] = h[i][a_cols + j];
-        }
-    }
-
-    // Find the pivot column of each row (first nonzero entry).
-    let pivot_col: Vec<Option<usize>> = (0..m)
-        .map(|i| (0..a_cols).find(|&j| k_mat[i][j] != 0))
-        .collect();
-
-    let mut sol = vec![vec![0i64; b_cols]; a_cols];
-
-    for j in 0..b_cols {
-        for i in (0..m).rev() {
-            let Some(pc) = pivot_col[i] else {
-                // zero row
-                continue;
-            };
-            let pivot = k_mat[i][pc];
-
-            let mut rhs = s_mat[i][j];
-            for l in (pc + 1)..a_cols {
-                rhs -= k_mat[i][l] * sol[l][j];
-            }
-
-            if rhs % pivot != 0 {
-                return Err(format!(
-                    "System has no integer solution (failed at row {}).",
-                    i
-                ));
-            }
-            sol[pc][j] = rhs / pivot;
-        }
-    }
-
-    Ok(sol)
+    // X = U^T * Y
+    let u_t = transpose(&u);
+    checked_matmul(&u_t, &y)
 }
 
 #[cfg(test)]

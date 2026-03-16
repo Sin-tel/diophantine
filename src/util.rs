@@ -1,5 +1,6 @@
 //! Utility functions.
 
+use crate::DiophantineError;
 use crate::Matrix;
 use crate::MatrixError;
 use num_traits::{One, Zero};
@@ -109,6 +110,48 @@ pub fn matmul(a: &Matrix<i64>, b: &Matrix<i64>) -> Result<Matrix<i64>, MatrixErr
     }
 
     Ok(result)
+}
+
+/// Multiplies two integer matrices (A * B).
+///
+/// Returns an error if the dimensions do not match or if an integer overflow occurs.
+pub fn checked_matmul(a: &Matrix<i64>, b: &Matrix<i64>) -> Result<Matrix<i64>, DiophantineError> {
+    if a.is_empty() || b.is_empty() || b[0].is_empty() {
+        return Ok(vec![]);
+    }
+
+    let a_rows = a.len();
+    let a_cols = a[0].len();
+    let b_rows = b.len();
+    let b_cols = b[0].len();
+
+    if a_cols != b_rows {
+        return Err(DiophantineError::InvalidDimensions(format!(
+            "Matrix multiplication dimension mismatch: cannot multiply {}x{} by {}x{}",
+            a_rows, a_cols, b_rows, b_cols
+        )));
+    }
+
+    let mut res = vec![vec![0i64; b_cols]; a_rows];
+
+    for i in 0..a_rows {
+        for j in 0..b_cols {
+            let mut sum = 0i64;
+            for k in 0..a_cols {
+                let term = a[i][k]
+                    .checked_mul(b[k][j])
+                    .ok_or(DiophantineError::Overflow(
+                        "Overflow in matrix multiplication",
+                    ))?;
+                sum = sum.checked_add(term).ok_or(DiophantineError::Overflow(
+                    "Overflow in matrix multiplication",
+                ))?;
+            }
+            res[i][j] = sum;
+        }
+    }
+
+    Ok(res)
 }
 
 /// Return matrix transpose.

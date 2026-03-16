@@ -2,3 +2,4 @@
 
 Cargo.lock
 *.sublime-*
+proptest-regressions

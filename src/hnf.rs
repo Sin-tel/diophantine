@@ -1,5 +1,6 @@
 //! Row-style Hermite Normal Form (HNF) calculation.
 
+use crate::error::DiophantineError;
 use crate::solve_diophantine;
 use crate::integer_det;
 use crate::util::transpose;
@@ -136,7 +137,7 @@ pub fn extended_hnf(basis: &Matrix<i64>) -> Result<(Matrix<i64>, Matrix<i64>), O
 /// Journal of Number Theory.
 ///
 /// <https://doi.org/10.1016/j.jnt.2010.01.017>
-pub fn saturation(m: &Matrix<i64>) -> Result<Matrix<i64>, String> {
+pub fn saturation(m: &Matrix<i64>) -> Result<Matrix<i64>, DiophantineError> {
     if m.is_empty() {
         return Ok(vec![]);
     }
@@ -144,7 +145,7 @@ pub fn saturation(m: &Matrix<i64>) -> Result<Matrix<i64>, String> {
 
     // Compute K, the HNF basis of the column space of M.
     let mt = transpose(m);
-    let hnf_mt = hnf(&mt)?;
+    let hnf_mt = hnf(&mt).map_err(|_| DiophantineError::Overflow("HNF overflow"))?;
     // We only need the first `r` rows, as the image can have at most rank `r`.
     let k_t = hnf_mt.iter().take(r).cloned().collect();
     let k = transpose(&k_t);
@@ -154,7 +155,7 @@ pub fn saturation(m: &Matrix<i64>) -> Result<Matrix<i64>, String> {
     if let Ok(det) = integer_det(&k)
         && det.abs() == 1
     {
-        return Ok(hnf(m)?);
+        return Ok(hnf(m).map_err(|_| DiophantineError::Overflow("HNF overflow"))?);
     }
 
     // Project M onto the basis K by solving KD = M for D.
@@ -162,7 +163,7 @@ pub fn saturation(m: &Matrix<i64>) -> Result<Matrix<i64>, String> {
     let d = solve_diophantine(&k, m)?;
 
     // The result is the HNF of this saturated matrix D.
-    Ok(hnf(&d)?)
+    Ok(hnf(&d).map_err(|_| DiophantineError::Overflow("HNF overflow"))?)
 }
 
 #[cfg(test)]
