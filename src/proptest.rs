@@ -1,14 +1,10 @@
-// TODO: Also test LLL conditions
-
 #[cfg(test)]
 mod proptests {
-    use crate::hnf::saturation;
+    use crate::error::DiophantineError;
+    use crate::hnf::{extended_hnf, hnf, saturation};
     use crate::solve_diophantine;
     use crate::util::{eye, matmul};
-    use crate::DiophantineError;
-    use crate::{
-        extended_hnf, hnf, integer_det, integer_inverse, left_kernel, right_kernel, Matrix,
-    };
+    use crate::{integer_det, integer_inverse, left_kernel, right_kernel, Matrix};
     use proptest::prelude::*;
 
     fn matrix(rows: usize, cols: usize, max_val: i64) -> impl Strategy<Value = Matrix<i64>> {
@@ -314,6 +310,5 @@ mod proptests {
                 }
             }
         }
-
     }
 }

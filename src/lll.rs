@@ -3,9 +3,10 @@
 //! Uses `f64` for calculations, so the results are not exact.
 
 use crate::util::vec_sub_assign;
+use crate::DiophantineError;
 use crate::Matrix;
 
-pub(crate) fn inner_prod(x: &[f64], y: &[f64], w: &Matrix<f64>) -> f64 {
+fn inner_prod(x: &[f64], y: &[f64], w: &Matrix<f64>) -> f64 {
     let n = w.len();
     if n == 0 {
         return 0.0;
@@ -84,17 +85,37 @@ fn mu(basis: &Matrix<i64>, ortho: &Matrix<f64>, w: &Matrix<f64>, i: usize, j: us
     }
 }
 
-/// LLL reduction
+/// Compute the LLL reduction of a basis.
+///
+/// Returns an error if dimensions do not match.
 ///
 /// # Arguments
 /// * `basis` - The lattice basis (row vectors).
 /// * `delta` - The reduction parameter (typically 0.75 or 0.99).
 /// * `w` - The quadratic form matrix (weights). Pass Identity matrix for standard Euclidean.
-pub fn lll(basis: &Matrix<i64>, delta: f64, w: &Matrix<f64>) -> Matrix<i64> {
+pub fn lll(
+    basis: &Matrix<i64>,
+    delta: f64,
+    w: &Matrix<f64>,
+) -> Result<Matrix<i64>, DiophantineError> {
     let mut basis = basis.clone();
+
     let n = basis.len();
+    let m = basis[0].len();
     if n == 0 {
-        return basis;
+        return Ok(vec![]);
+    }
+
+    if w.len() != m {
+        return Err(DiophantineError::InvalidDimensions(
+            "Basis should have same number of columns as w".to_string(),
+        ));
+    }
+
+    if w.len() != w[0].len() {
+        return Err(DiophantineError::InvalidDimensions(
+            "W must be square".to_string(),
+        ));
     }
 
     let mut ortho = gramschmidt(&basis, w);
@@ -136,21 +157,45 @@ pub fn lll(basis: &Matrix<i64>, delta: f64, w: &Matrix<f64>) -> Matrix<i64> {
         }
     }
 
-    basis
+    Ok(basis)
 }
 
 /// Babai's Nearest Plane Algorithm for approximate CVP.
+///
+/// Returns an error if dimensions do not match.
 /// The basis should be LLL-reduced first.
 ///
 /// # Arguments
 /// * `v`     - The query vector.
 /// * `delta` - The reduction parameter (typically 0.75 or 0.99).
 /// * `w` - The quadratic form matrix (weights). Pass Identity matrix for standard Euclidean.
-pub fn nearest_plane(v: &[i64], basis: &Matrix<i64>, w: &Matrix<f64>) -> Vec<i64> {
+pub fn nearest_plane(
+    v: &[i64],
+    basis: &Matrix<i64>,
+    w: &Matrix<f64>,
+) -> Result<Vec<i64>, DiophantineError> {
     let mut b = v.to_vec();
+
     let n = basis.len(); // number of rows
+    let m = basis[0].len(); // number of cols
     if n == 0 {
-        return v.to_vec();
+        return Ok(vec![]);
+    }
+
+    if v.len() != n {
+        return Err(DiophantineError::InvalidDimensions(
+            "Target vector should have same length as basis".to_string(),
+        ));
+    }
+    if w.len() != m {
+        return Err(DiophantineError::InvalidDimensions(
+            "Basis should have same number of columns as w".to_string(),
+        ));
+    }
+    if w.len() != w[0].len() {
+        return Err(DiophantineError::InvalidDimensions(
+            "W must be square".to_string(),
+        ));
     }
 
     let ortho = gramschmidt(basis, w);
@@ -174,7 +219,7 @@ pub fn nearest_plane(v: &[i64], basis: &Matrix<i64>, w: &Matrix<f64>) -> Vec<i64
     for (orig_val, residue_val) in v.iter().zip(b.iter()) {
         result.push(orig_val - residue_val);
     }
-    result
+    Ok(result)
 }
 
 #[cfg(test)]
@@ -192,7 +237,7 @@ mod tests {
         // LLL of identity is identity
         let basis = vec![vec![1, 0], vec![0, 1]];
         let w = eye(2);
-        let reduced = lll(&basis, 0.99, &w);
+        let reduced = lll(&basis, 0.99, &w).unwrap();
         assert_eq!(basis, reduced);
     }
 
@@ -207,7 +252,7 @@ mod tests {
         ];
         let w = eye(4);
 
-        let reduced = lll(&basis, 0.99, &w);
+        let reduced = lll(&basis, 0.99, &w).unwrap();
 
         let det_in = integer_det(&basis).unwrap().abs();
         let det_out = integer_det(&reduced).unwrap().abs();
@@ -235,7 +280,7 @@ mod tests {
         ];
         let w = eye(4);
 
-        let reduced = lll(&basis, 0.99, &w);
+        let reduced = lll(&basis, 0.99, &w).unwrap();
 
         let det_in = integer_det(&basis).unwrap().abs();
         let det_out = integer_det(&reduced).unwrap().abs();
@@ -269,7 +314,7 @@ mod tests {
         ];
 
         let w = eye(4);
-        let reduced = lll(&basis, 0.99, &w);
+        let reduced = lll(&basis, 0.99, &w).unwrap();
 
         // Don't know what sign it is going to give
         assert!(reduced[0] == vec![1, -1, -1, 0] || reduced[0] == vec![-1, 1, 1, 0]);
@@ -282,11 +327,11 @@ mod tests {
         let w = eye(2);
 
         let target = vec![10, 10];
-        let res = nearest_plane(&target, &basis, &w);
+        let res = nearest_plane(&target, &basis, &w).unwrap();
         assert_eq!(res, vec![10, 10]);
 
         let target = vec![123, 456];
-        let res = nearest_plane(&target, &basis, &w);
+        let res = nearest_plane(&target, &basis, &w).unwrap();
         assert_eq!(res, vec![123, 456]);
     }
 
@@ -297,11 +342,160 @@ mod tests {
         let w = eye(2);
 
         let target = vec![3, 3];
-        let res = nearest_plane(&target, &basis, &w);
+        let res = nearest_plane(&target, &basis, &w).unwrap();
         assert_eq!(res, vec![4, 4]);
 
         let target = vec![5, 1];
-        let res = nearest_plane(&target, &basis, &w);
+        let res = nearest_plane(&target, &basis, &w).unwrap();
         assert_eq!(res, vec![4, 0]);
+    }
+
+    #[test]
+    fn test_lll_dims() {
+        let basis = vec![vec![1, 0], vec![0, 1], vec![0, 1]];
+        let w = eye(3);
+        let res = lll(&basis, 0.75, &w);
+        assert!(matches!(res, Err(DiophantineError::InvalidDimensions(_))));
+
+        let basis = eye(3);
+        let w = vec![vec![1., 0.], vec![0., 1.], vec![0., 1.]];
+        let res = lll(&basis, 0.75, &w);
+        assert!(matches!(res, Err(DiophantineError::InvalidDimensions(_))));
+    }
+
+    #[test]
+    fn test_nearest_plane_dims() {
+        let target = vec![1, 2, 3, 4];
+        let basis = eye(3);
+        let w = eye(3);
+        let res = nearest_plane(&target, &basis, &w);
+        assert!(matches!(res, Err(DiophantineError::InvalidDimensions(_))));
+
+        let target = vec![1, 2, 3];
+        let basis = eye(3);
+        let w = eye(4);
+        let res = nearest_plane(&target, &basis, &w);
+        assert!(matches!(res, Err(DiophantineError::InvalidDimensions(_))));
+    }
+}
+
+#[cfg(test)]
+mod proptests {
+    use super::*;
+    use crate::util::{eye, transpose};
+    use crate::{integer_det, solve_diophantine};
+    use proptest::prelude::*;
+
+    fn matrix(rows: usize, cols: usize, max_val: i64) -> impl Strategy<Value = Matrix<i64>> {
+        proptest::collection::vec(proptest::collection::vec(-max_val..max_val, cols), rows)
+    }
+
+    prop_compose! {
+        fn random_basis()(n in 2usize..=5)(mat in matrix(n, n, 30)) -> Matrix<i64> {
+            mat
+        }
+    }
+
+    prop_compose! {
+        fn random_basis_target()(n in 2usize..=5)
+        (
+            basis in matrix(n, n, 20),
+            target in proptest::collection::vec(-100i64..100, n),
+        ) -> (Matrix<i64>, Vec<i64>) {
+            (basis, target)
+        }
+    }
+
+    proptest! {
+        #![proptest_config(ProptestConfig::with_cases(10_000))]
+
+        #[test]
+        fn test_lll_properties(
+            basis in random_basis()
+        ) {
+            // Skip singular matrices
+            let det_orig = integer_det(&basis).unwrap_or(0);
+            prop_assume!(det_orig != 0);
+
+            let n = basis.len();
+
+            let w = eye(n);
+            let delta = 0.75;
+            let reduced = lll(&basis, delta, &w).unwrap();
+
+            // Determinant is preserved
+            let det_red = integer_det(&reduced).unwrap();
+            prop_assert_eq!(det_orig.abs(), det_red.abs(), "Determinant magnitude changed!");
+
+            let ortho = gramschmidt(&reduced, &w);
+            let n = reduced.len();
+
+            // Size Reduction Condition: |mu_{i,j}| <= 0.5
+            for i in 0..n {
+                for j in 0..i {
+                    let mu_ij = mu(&reduced, &ortho, &w, i, j);
+                    // Add tiny epsilon for f64 math
+                    prop_assert!(
+                        mu_ij.abs() <= 0.500001,
+                        "Size reduction failed: mu_{},{} = {}", i, j, mu_ij
+                    );
+                }
+            }
+
+            // Lovasz Condition: delta * ||b*_{k-1}||^2 <= ||b*_k||^2 + mu_{k, k-1}^2 ||b*_{k-1}||^2
+            for k in 1..n {
+                let mu_k_k1 = mu(&reduced, &ortho, &w, k, k - 1);
+                let norm_ortho_k1 = inner_prod(&ortho[k - 1], &ortho[k - 1], &w);
+                let norm_ortho_k = inner_prod(&ortho[k], &ortho[k], &w);
+
+                let lhs = delta * norm_ortho_k1;
+                let rhs = norm_ortho_k + mu_k_k1.powi(2) * norm_ortho_k1;
+
+                prop_assert!(
+                    lhs <= rhs + 1e-6,
+                    "Lovasz condition failed at step {}: {} > {}", k, lhs, rhs
+                );
+            }
+        }
+
+        #[test]
+        fn test_nearest_plane_properties((basis, target) in random_basis_target()) {
+            prop_assume!(integer_det(&basis).unwrap_or(0) != 0);
+
+            let n = basis.len();
+            let w = eye(n);
+
+            // Nearest plane requires an LLL-reduced basis to work effectively
+            let reduced = lll(&basis, 0.75, &w).unwrap();
+            let np = nearest_plane(&target, &reduced, &w).unwrap();
+
+            // The result must be a point on the lattice.
+            // We verify this by solving: (reduced^T) * X = (np^T)
+            let red_t = transpose(&reduced);
+            let mut np_t = vec![vec![0; 1]; n];
+            for i in 0..n {
+                np_t[i][0] = np[i];
+            }
+
+            let sol = solve_diophantine(&red_t, &np_t);
+            prop_assert!(sol.is_ok(), "nearest_plane result is not an integer combination of the basis!");
+
+            // The error vector must fall within the fundamental parallelepiped
+            // of the Gram-Schmidt basis.
+            let ortho = gramschmidt(&reduced, &w);
+            let error: Vec<f64> = target.iter().zip(np.iter()).map(|(&t, &p)| (t - p) as f64).collect();
+
+            for i in 0..n {
+                let a = &ortho[i];
+                let num = inner_prod(a, &error, &w);
+                let den = inner_prod(a, a, &w);
+                let mu_err = if den.abs() < 1e-9 { 0.0 } else { num / den };
+
+                prop_assert!(
+                    mu_err.abs() <= 0.500001,
+                    "Error vector projection onto GS vector {} exceeds 0.5: {}", i, mu_err
+                );
+            }
+        }
     }
 }
