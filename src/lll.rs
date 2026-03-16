@@ -2,9 +2,18 @@
 //!
 //! Uses `f64` for calculations, so the results are not exact.
 
-use crate::util::vec_sub_assign;
-use crate::DiophantineError;
-use crate::Matrix;
+use crate::{DiophantineError, Matrix};
+use std::ops::SubAssign;
+
+/// Subtracts `scale * other` from `target` in place.
+fn vec_sub_assign<T>(target: &mut [T], other: &[T], scale: T)
+where
+    T: Copy + SubAssign + std::ops::Mul<Output = T>,
+{
+    for (t, &o) in target.iter_mut().zip(other.iter()) {
+        *t -= scale * o;
+    }
+}
 
 fn inner_prod(x: &[f64], y: &[f64], w: &Matrix<f64>) -> f64 {
     let n = w.len();
@@ -225,8 +234,7 @@ pub fn nearest_plane(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::integer_det;
-    use crate::util::eye;
+    use crate::{eye, integer_det};
 
     fn norm_sq(v: &[i64]) -> i64 {
         v.iter().map(|x| x * x).sum()
@@ -382,8 +390,7 @@ mod tests {
 #[cfg(test)]
 mod proptests {
     use super::*;
-    use crate::util::{eye, transpose};
-    use crate::{integer_det, solve_diophantine};
+    use crate::{eye, integer_det, solve_diophantine, transpose};
     use proptest::prelude::*;
 
     fn matrix(rows: usize, cols: usize, max_val: i64) -> impl Strategy<Value = Matrix<i64>> {

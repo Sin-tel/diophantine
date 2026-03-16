@@ -1,10 +1,9 @@
 #[cfg(test)]
 mod proptests {
-    use crate::error::DiophantineError;
-    use crate::hnf::{extended_hnf, hnf, saturation};
-    use crate::solve_diophantine;
-    use crate::util::{eye, matmul};
-    use crate::{integer_det, integer_inverse, left_kernel, right_kernel, Matrix};
+    use crate::{
+        eye, hnf, hnf_extended, integer_det, integer_inverse, kernel_left, kernel_right, matmul,
+        saturation, solve_diophantine, DiophantineError, Matrix,
+    };
     use proptest::prelude::*;
 
     fn matrix(rows: usize, cols: usize, max_val: i64) -> impl Strategy<Value = Matrix<i64>> {
@@ -177,8 +176,8 @@ mod proptests {
         }
 
         #[test]
-        fn left_kernel_property(mat in rank_deficient_matrix()) {
-            if let Ok(kernel) = left_kernel(&mat) {
+        fn kernel_left_property(mat in rank_deficient_matrix()) {
+            if let Ok(kernel) = kernel_left(&mat) {
                 let res = matmul(&kernel, &mat).unwrap();
 
                 if !res.is_empty() {
@@ -192,8 +191,8 @@ mod proptests {
         }
 
         #[test]
-        fn right_kernel_property(mat in rank_deficient_matrix()) {
-            if let Ok(kernel) = right_kernel(&mat) {
+        fn kernel_right_property(mat in rank_deficient_matrix()) {
+            if let Ok(kernel) = kernel_right(&mat) {
                 let res = matmul(&mat, &kernel).unwrap();
 
                 if !res.is_empty() {
@@ -208,9 +207,9 @@ mod proptests {
 
         #[test]
         fn hnf_extended_same(mat in random_matrix()) {
-            // hnf and extended_hnf should give the same results
+            // hnf and hnf_extended should give the same results
             let h = hnf(&mat);
-            let h_ext = extended_hnf(&mat);
+            let h_ext = hnf_extended(&mat);
 
 
             if let (Ok(h), Ok((h2, _))) = (h, h_ext) {
@@ -221,7 +220,7 @@ mod proptests {
         #[test]
         fn hnf_invariants(mat in random_matrix()) {
             // Extended HNF must always satisfy U * A = H
-            if let Ok((h, u)) = extended_hnf(&mat) {
+            if let Ok((h, u)) = hnf_extended(&mat) {
                 // U must be unimodular (abs(det(U)) == 1)
                 if let Ok(det_u) = integer_det(&u) {
                     prop_assert_eq!(det_u.abs(), 1);
@@ -295,8 +294,8 @@ mod proptests {
 
             // Calculate it via the double kernel trick.
             let saturation_dual = (|| {
-                let ker = right_kernel(&mat)?;
-                let basis = left_kernel(&ker)?;
+                let ker = kernel_right(&mat)?;
+                let basis = kernel_left(&ker)?;
                 hnf(&basis)
             })();
 

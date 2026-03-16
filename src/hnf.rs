@@ -1,17 +1,13 @@
 //! Row-style Hermite Normal Form (HNF) calculation.
 
-use crate::error::DiophantineError;
-use crate::solve_diophantine;
-use crate::integer_det;
-use crate::util::transpose;
-use crate::Matrix;
+use crate::{DiophantineError, Matrix, transpose, solve_diophantine, integer_det};
 
 /// Computes the Hermite Normal Form of an integer matrix.
 ///
 /// Returns the HNF basis.
 pub fn hnf(basis: &Matrix<i64>) -> Result<Matrix<i64>, DiophantineError> {
     // TODO: We do some extra work here for U which can be avoided
-    let (h, _) = extended_hnf(basis)?;
+    let (h, _) = hnf_extended(basis)?;
     Ok(h)
 }
 
@@ -19,7 +15,7 @@ pub fn hnf(basis: &Matrix<i64>) -> Result<Matrix<i64>, DiophantineError> {
 ///
 /// Returns a tuple `(H, U)` where `H` is the HNF and `U` is the unimodular
 /// transformation matrix such that `U * A = H`.
-pub fn extended_hnf(basis: &Matrix<i64>) -> Result<(Matrix<i64>, Matrix<i64>), DiophantineError> {
+pub fn hnf_extended(basis: &Matrix<i64>) -> Result<(Matrix<i64>, Matrix<i64>), DiophantineError> {
     let mut a = basis.clone();
     let n = a.len();
     if n == 0 {
@@ -168,8 +164,7 @@ pub fn saturation(m: &Matrix<i64>) -> Result<Matrix<i64>, DiophantineError> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::integer_det;
-    use crate::util::matmul;
+    use crate::{matmul, integer_det};
 
     #[test]
     fn hnf_simple() {
@@ -205,9 +200,9 @@ mod tests {
     }
 
     #[test]
-    fn extended_hnf_unimodularity() {
+    fn hnf_extended_unimodularity() {
         let a = vec![vec![8, 2], vec![12, 4]];
-        let (h, u) = extended_hnf(&a).unwrap();
+        let (h, u) = hnf_extended(&a).unwrap();
 
         // Determinant of U must be +/-1 to preserve the Z-lattice
         let det_u = integer_det(&u).unwrap().abs();

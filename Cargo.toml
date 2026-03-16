@@ -1,7 +1,14 @@
 [package]
 name = "diophantine"
 version = "0.1.0"
+authors =["Sintel"]
 edition = "2024"
+description = "Tools for exact integer linear algebra, lattices, and Diophantine equations."
+repository = "https://github.com/sin-tel/diophantine"
+license = "MIT"
+keywords =["lattice", "math", "matrix", "algebra", "hnf"]
+categories = ["mathematics", "algorithms"]
+
 
 [dependencies]
 num-traits = "0.2"
