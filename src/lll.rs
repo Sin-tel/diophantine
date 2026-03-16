@@ -87,11 +87,7 @@ fn mu(basis: &Matrix<i64>, ortho: &Matrix<f64>, w: &Matrix<f64>, i: usize, j: us
     let num = inner_prod(a, &b, w);
     let den = inner_prod(a, a, w);
 
-    if den.abs() < 1e-9 {
-        0.0
-    } else {
-        num / den
-    }
+    if den.abs() < 1e-9 { 0.0 } else { num / den }
 }
 
 /// Compute the LLL reduction of a basis.

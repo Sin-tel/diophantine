@@ -5,7 +5,7 @@
 //! Rust implementation and does not depend on external libraries such as FLINT.
 //!
 //! # Features
-//! * Solving Diophantine equations: Find exact integer matrix solutions to $AX = B$.
+//! * Solving Diophantine equations: Find exact integer matrix solutions to AX = B.
 //! * Exact determinants & inverses.
 //! * Hermite Normal Form (HNF): Compute the HNF and extended HNF of integer matrices.
 //! * Lattice reduction: Lenstra–Lenstra–Lovász (LLL) basis reduction.
@@ -39,12 +39,28 @@
 //! results are produced in release mode. Extensive property testing is used to guarantee
 //! the algorithms are correct and free of panics.
 
-// This lint tends to reduce clarity for loops over matrices
-#![allow(clippy::needless_range_loop)]
 #![warn(missing_docs)]
 #![warn(missing_debug_implementations)]
 #![warn(rust_2018_idioms)]
+#![deny(unreachable_patterns)]
 #![warn(clippy::cast_lossless)]
+#![warn(clippy::uninlined_format_args)]
+#![warn(clippy::semicolon_if_nothing_returned)]
+#![warn(clippy::explicit_iter_loop)]
+#![warn(clippy::ignored_unit_patterns)]
+#![warn(clippy::redundant_else)]
+#![warn(clippy::match_same_arms)]
+#![warn(clippy::single_match_else)]
+#![warn(clippy::unnested_or_patterns)]
+#![warn(clippy::inconsistent_struct_constructor)]
+#![warn(clippy::needless_borrow)]
+#![warn(clippy::match_wildcard_for_single_variants)]
+#![warn(clippy::manual_assert)]
+#![warn(clippy::manual_let_else)]
+#![warn(clippy::unnecessary_semicolon)]
+#![warn(clippy::large_stack_arrays)]
+// This lint tends to reduce clarity for loops over matrices
+#![allow(clippy::needless_range_loop)]
 
 mod error;
 mod hnf;

@@ -1,8 +1,8 @@
 #[cfg(test)]
 mod proptests {
     use crate::{
-        eye, hnf, hnf_extended, integer_det, integer_inverse, kernel_left, kernel_right, matmul,
-        saturation, solve_diophantine, DiophantineError, Matrix,
+        DiophantineError, Matrix, eye, hnf, hnf_extended, integer_det, integer_inverse,
+        kernel_left, kernel_right, matmul, saturation, solve_diophantine,
     };
     use proptest::prelude::*;
 

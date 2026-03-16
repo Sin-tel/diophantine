@@ -16,9 +16,9 @@ pub enum DiophantineError {
 impl fmt::Display for DiophantineError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            DiophantineError::InvalidDimensions(msg) => write!(f, "Invalid dimensions: {}", msg),
-            DiophantineError::NoSolution(msg) => write!(f, "No integer solution: {}", msg),
-            DiophantineError::Overflow(msg) => write!(f, "Integer overflow: {}", msg),
+            DiophantineError::InvalidDimensions(msg) => write!(f, "Invalid dimensions: {msg}"),
+            DiophantineError::NoSolution(msg) => write!(f, "No integer solution: {msg}"),
+            DiophantineError::Overflow(msg) => write!(f, "Integer overflow: {msg}"),
         }
     }
 }
@@ -27,6 +27,6 @@ impl std::error::Error for DiophantineError {}
 
 impl From<DiophantineError> for String {
     fn from(e: DiophantineError) -> String {
-        format!("{}", e)
+        format!("{e}")
     }
 }

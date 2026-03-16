@@ -42,11 +42,11 @@ fn pretty_print<T: Display>(matrix: &Matrix<T>) {
             .join("");
 
         if i == 0 {
-            println!("[[{}]", cells);
+            println!("[[{cells}]");
         } else if i == n - 1 {
-            println!(" [{}]]", cells);
+            println!(" [{cells}]]");
         } else {
-            println!(" [{}]", cells);
+            println!(" [{cells}]");
         }
     }
 }

@@ -1,4 +1,4 @@
-use crate::{hnf_extended, DiophantineError, Matrix};
+use crate::{DiophantineError, Matrix, hnf_extended};
 use num_traits::{One, Zero};
 
 /// Creates an identity matrix of size `n`.
@@ -44,8 +44,7 @@ pub fn matmul(a: &Matrix<i64>, b: &Matrix<i64>) -> Result<Matrix<i64>, Diophanti
 
     if a_cols != b_rows {
         return Err(DiophantineError::InvalidDimensions(format!(
-            "Matrix multiplication dimension mismatch: cannot multiply {}x{} by {}x{}",
-            a_rows, a_cols, b_rows, b_cols
+            "Matrix multiplication dimension mismatch: cannot multiply {a_rows}x{a_cols} by {b_rows}x{b_cols}",
         )));
     }
 
@@ -117,7 +116,7 @@ pub fn integer_det(basis: &Matrix<i64>) -> Result<i64, DiophantineError> {
                     None => {
                         return Err(DiophantineError::Overflow(
                             "Overflow in determinant calculation",
-                        ))
+                        ));
                     }
                 }
             }
@@ -167,7 +166,7 @@ pub fn integer_inverse(basis: &Matrix<i64>) -> Result<Matrix<i64>, DiophantineEr
                 None => {
                     return Err(DiophantineError::NoSolution(
                         "Matrix is singular".to_string(),
-                    ))
+                    ));
                 }
             }
         }
@@ -202,8 +201,7 @@ pub fn integer_inverse(basis: &Matrix<i64>) -> Result<Matrix<i64>, DiophantineEr
     let det = sign * a[n - 1][n - 1];
     if det.abs() != 1 {
         return Err(DiophantineError::NoSolution(format!(
-            "Matrix is not unimodular (det = {})",
-            det
+            "Matrix is not unimodular (det = {det})"
         )));
     }
 
@@ -310,28 +308,24 @@ pub fn solve_diophantine(
 
     for c in 0..b_cols {
         for i in 0..a_rows {
-            match pivot_row_of_col[i] {
-                Some(k) => {
-                    let pivot = h[k][i];
-                    let dot = checked_partial_col_dot(&h, i, &y, c, k)?;
-                    let rhs = b[i][c].checked_sub(dot).ok_or(DiophantineError::Overflow(
-                        "Overflow during back-substitution",
-                    ))?;
+            if let Some(k) = pivot_row_of_col[i] {
+                let pivot = h[k][i];
+                let dot = checked_partial_col_dot(&h, i, &y, c, k)?;
+                let rhs = b[i][c].checked_sub(dot).ok_or(DiophantineError::Overflow(
+                    "Overflow during back-substitution",
+                ))?;
 
-                    if rhs % pivot != 0 {
-                        return Err(DiophantineError::NoSolution(format!("Failed at row {}", i)));
-                    }
-                    y[k][c] = rhs / pivot;
+                if rhs % pivot != 0 {
+                    return Err(DiophantineError::NoSolution(format!("Failed at row {i}")));
                 }
-                None => {
-                    // Equation is redundant, check if it's perfectly consistent
-                    let dot = checked_partial_col_dot(&h, i, &y, c, a_cols)?;
-                    if dot != b[i][c] {
-                        return Err(DiophantineError::NoSolution(format!(
-                            "Inconsistent at row {}",
-                            i
-                        )));
-                    }
+                y[k][c] = rhs / pivot;
+            } else {
+                // Equation is redundant, check if it's perfectly consistent
+                let dot = checked_partial_col_dot(&h, i, &y, c, a_cols)?;
+                if dot != b[i][c] {
+                    return Err(DiophantineError::NoSolution(format!(
+                        "Inconsistent at row {i}"
+                    )));
                 }
             }
         }

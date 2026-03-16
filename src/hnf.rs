@@ -1,6 +1,6 @@
 //! Row-style Hermite Normal Form (HNF) calculation.
 
-use crate::{DiophantineError, Matrix, transpose, solve_diophantine, integer_det};
+use crate::{DiophantineError, Matrix, integer_det, solve_diophantine, transpose};
 
 /// Computes the Hermite Normal Form of an integer matrix.
 ///
@@ -11,7 +11,6 @@ pub fn hnf(basis: &Matrix<i64>) -> Result<Matrix<i64>, DiophantineError> {
     Ok(h)
 }
 
-#[must_use]
 fn apply_row_operation(
     a: &mut Matrix<i64>,
     k: i64,
@@ -31,7 +30,6 @@ fn apply_row_operation(
     Ok(())
 }
 
-#[must_use]
 fn negate_row(a: &mut Matrix<i64>, i: usize) -> Result<(), DiophantineError> {
     let m = a[0].len();
     for col in 0..m {
@@ -164,7 +162,7 @@ pub fn saturation(m: &Matrix<i64>) -> Result<Matrix<i64>, DiophantineError> {
     if let Ok(det) = integer_det(&k)
         && det.abs() == 1
     {
-        return Ok(hnf(m)?);
+        return hnf(m);
     }
 
     // Project M onto the basis K by solving KD = M for D.
@@ -172,7 +170,7 @@ pub fn saturation(m: &Matrix<i64>) -> Result<Matrix<i64>, DiophantineError> {
     let d = solve_diophantine(&k, m)?;
 
     // The result is the HNF of this saturated matrix D.
-    Ok(hnf(&d)?)
+    hnf(&d)
 }
 
 #[cfg(test)]
