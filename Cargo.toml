@@ -12,4 +12,6 @@ categories = ["mathematics", "algorithms"]
 
 [dependencies]
 num-traits = "0.2"
+
+[dev-dependencies]
 proptest = "1.10"
