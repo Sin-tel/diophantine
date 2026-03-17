@@ -14,7 +14,7 @@ Rust implementation and does not depend on external libraries such as FLINT.
 * Nullspaces: Compute exact left and right integer kernels of matrices.
 
 ## Example: Solving a system of linear Diophantine equations
-```
+```rust
 use diophantine::{solve_diophantine, Matrix};
 
 // 2x + 3y = 8
