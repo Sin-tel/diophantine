@@ -1,4 +1,4 @@
-//! Lenstra–Lenstra–Lovász (LLL) lattice basis reduction algorithm and related functions.
+//! Lattice basis reduction, CVP, SVP.
 //!
 //! Uses `f64` for calculations, so the results are not exact.
 
@@ -227,6 +227,223 @@ pub fn nearest_plane(
     Ok(result)
 }
 
+/// Internal helper for Schnorr-Euchner enumeration.
+///
+/// Returns the integer coefficients of the basis vectors that yield the closest point.
+/// If `nonzero_only` is true, the zero vector is considered an invalid solution (useful for SVP).
+fn schnorr_euchner(
+    v: &[i64],
+    basis: &Matrix<i64>,
+    w: &Matrix<f64>,
+    nonzero_only: bool,
+) -> Result<Vec<i64>, DiophantineError> {
+    let n = basis.len();
+    if n == 0 {
+        return Ok(vec![]);
+    }
+    let m = basis[0].len();
+
+    // Compute Gram-Schmidt orthogonalization
+    let ortho = gramschmidt(basis, w);
+
+    let mut b_star_norms = vec![0.0; n];
+    for i in 0..n {
+        let norm = inner_prod(&ortho[i], &ortho[i], w);
+        // Floor the norm at a small epsilon to avoid infinite loops on degenerate dimensions
+        b_star_norms[i] = if norm < 1e-9 { 1e-9 } else { norm };
+    }
+
+    // Cache floating point representation of the basis to avoid inner loop allocations
+    let mut basis_f64 = vec![vec![0.0; m]; n];
+    for i in 0..n {
+        for j in 0..m {
+            basis_f64[i][j] = basis[i][j] as f64;
+        }
+    }
+
+    // Compute GS mu coefficients
+    let mut mu_mat = vec![vec![0.0; n]; n];
+    for i in 0..n {
+        mu_mat[i][i] = 1.0;
+        for j in 0..i {
+            let num = inner_prod(&basis_f64[i], &ortho[j], w);
+            mu_mat[i][j] = num / b_star_norms[j];
+        }
+    }
+
+    // Project target vector into the GS basis (theta)
+    let mut theta = vec![0.0; n];
+    let v_f64: Vec<f64> = v.iter().map(|&x| x as f64).collect();
+    for j in 0..n {
+        let num = inner_prod(&v_f64, &ortho[j], w);
+        theta[j] = num / b_star_norms[j];
+    }
+
+    // State setup
+    let mut best_dist = f64::INFINITY;
+    let mut best_x = vec![0i64; n];
+
+    let mut x = vec![0i64; n];
+    let mut c = vec![0.0; n];
+    let mut p = vec![0.0; n + 1];
+    let mut d = vec![0i64; n];
+    let mut step = vec![0i64; n];
+
+    let mut k = (n - 1) as isize;
+
+    // Initialize the root node at level n - 1
+    let ku = k as usize;
+    c[ku] = theta[ku];
+    x[ku] = c[ku].round_ties_even() as i64;
+    let y = c[ku] - x[ku] as f64;
+    step[ku] = if y >= 0.0 { 1 } else { -1 };
+    d[ku] = 1;
+    p[ku] = p[ku + 1] + y * y * b_star_norms[ku];
+
+    // Depth-first search
+    while k < n as isize {
+        let ku = k as usize;
+
+        // If partial distance is strictly less than the best found distance, move deeper
+        if p[ku] < best_dist {
+            if k == 0 {
+                // Reached a leaf node (a complete lattice point)
+                let valid = if nonzero_only {
+                    x.iter().any(|&xi| xi != 0)
+                } else {
+                    true
+                };
+
+                if valid {
+                    best_dist = p[ku];
+                    best_x.copy_from_slice(&x);
+                }
+
+                // Advance to the next integer coefficient at this leaf node
+                x[ku] += step[ku] * d[ku];
+                step[ku] = -step[ku];
+                d[ku] += 1;
+                let y = c[ku] - x[ku] as f64;
+                p[ku] = p[ku + 1] + y * y * b_star_norms[ku];
+            } else {
+                // Internal node: step down to level k - 1
+                k -= 1;
+                let ku = k as usize;
+
+                let mut sum = 0.0;
+                for i in (ku + 1)..n {
+                    sum += x[i] as f64 * mu_mat[i][ku];
+                }
+                c[ku] = theta[ku] - sum;
+                x[ku] = c[ku].round_ties_even() as i64;
+
+                let y = c[ku] - x[ku] as f64;
+                step[ku] = if y >= 0.0 { 1 } else { -1 };
+                d[ku] = 1;
+                p[ku] = p[ku + 1] + y * y * b_star_norms[ku];
+            }
+        } else {
+            // Prune current branch: step back up to level k + 1
+            k += 1;
+            if k < n as isize {
+                let ku = k as usize;
+                // Prepare the next alternating coefficient in SE order
+                x[ku] += step[ku] * d[ku];
+                step[ku] = -step[ku];
+                d[ku] += 1;
+
+                let y = c[ku] - x[ku] as f64;
+                p[ku] = p[ku + 1] + y * y * b_star_norms[ku];
+            }
+        }
+    }
+
+    Ok(best_x)
+}
+
+/// Exact Closest Vector Problem (CVP) using Schnorr-Euchner enumeration.
+///
+/// Returns the exact closest vector in the lattice to the target vector `v`.
+/// For reasonable performance, `basis` MUST be highly reduced (e.g., LLL or BKZ) before calling.
+///
+/// # Arguments
+/// * `v` - The target vector (should match the number of columns in the basis).
+/// * `basis` - The lattice basis (row vectors).
+/// * `w` - The metric quadratic form matrix (weights).
+pub fn cvp_exact(
+    v: &[i64],
+    basis: &Matrix<i64>,
+    w: &Matrix<f64>,
+) -> Result<Vec<i64>, DiophantineError> {
+    let n = basis.len();
+    if n == 0 {
+        return Ok(vec![]);
+    }
+    let m = basis[0].len();
+
+    if v.len() != m {
+        return Err(DiophantineError::InvalidDimensions(
+            "Target vector should have same length as basis columns".to_string(),
+        ));
+    }
+    if w.len() != m || w[0].len() != m {
+        return Err(DiophantineError::InvalidDimensions(
+            "W must be square and match basis columns".to_string(),
+        ));
+    }
+
+    let best_x = schnorr_euchner(v, basis, w, false)?;
+
+    // Linearly combine the basic vectors according to best_x coefficients
+    let mut result = vec![0; m];
+    for i in 0..n {
+        if best_x[i] != 0 {
+            for j in 0..m {
+                result[j] += best_x[i] * basis[i][j];
+            }
+        }
+    }
+
+    Ok(result)
+}
+
+/// Exact Shortest Vector Problem (SVP) using Schnorr-Euchner enumeration.
+///
+/// Returns the exact shortest **non-zero** vector in the lattice.
+/// For reasonable performance, `basis` MUST be highly reduced (e.g., LLL or BKZ) before calling.
+///
+/// # Arguments
+/// * `basis` - The lattice basis (row vectors).
+/// * `w` - The metric quadratic form matrix (weights).
+pub fn svp_exact(basis: &Matrix<i64>, w: &Matrix<f64>) -> Result<Vec<i64>, DiophantineError> {
+    let n = basis.len();
+    if n == 0 {
+        return Ok(vec![]);
+    }
+    let m = basis[0].len();
+
+    if w.len() != m || w[0].len() != m {
+        return Err(DiophantineError::InvalidDimensions(
+            "W must be square and match basis columns".to_string(),
+        ));
+    }
+
+    // SVP is precisely CVP centering around the origin with a strict constraint of non-zero coordinates
+    let origin = vec![0; m];
+    let best_x = schnorr_euchner(&origin, basis, w, true)?;
+
+    let mut result = vec![0; m];
+    for i in 0..n {
+        if best_x[i] != 0 {
+            for j in 0..m {
+                result[j] += best_x[i] * basis[i][j];
+            }
+        }
+    }
+
+    Ok(result)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -301,7 +518,7 @@ mod tests {
     }
 
     #[test]
-    fn lll_phi() {
+    fn phi_lll() {
         // Find an integer polynomial for the golden ratio
         // Last row:
         //   round(10_000 * phi^2)
@@ -322,6 +539,19 @@ mod tests {
 
         // Don't know what sign it is going to give
         assert!(reduced[0] == vec![1, -1, -1, 0] || reduced[0] == vec![-1, 1, 1, 0]);
+    }
+
+    #[test]
+    fn phi_exact() {
+        let basis = vec![
+            vec![1, 0, 0, 26_180],
+            vec![0, 1, 0, 16_180],
+            vec![0, 0, 1, 10_000],
+        ];
+
+        let w = eye(4);
+        let sv = svp_exact(&basis, &w).unwrap();
+        assert!(sv == vec![1, -1, -1, 0] || sv == vec![-1, 1, 1, 0]);
     }
 
     #[test]
@@ -381,6 +611,67 @@ mod tests {
         let res = nearest_plane(&target, &basis, &w);
         assert!(matches!(res, Err(DiophantineError::InvalidDimensions(_))));
     }
+
+    #[test]
+    fn svp_identity() {
+        let basis = vec![vec![1, 0], vec![0, 1]];
+        let w = eye(2);
+        let sv = svp_exact(&basis, &w).unwrap();
+
+        let norm = norm_sq(&sv);
+        assert_eq!(norm, 1, "Shortest vector in Z^2 should have norm 1");
+        assert!(sv == vec![1, 0] || sv == vec![0, 1] || sv == vec![-1, 0] || sv == vec![0, -1]);
+    }
+
+    #[test]
+    fn svp_known_lattice() {
+        let basis = vec![vec![1, 13, 14], vec![0, 12, 13]];
+        let w = eye(3);
+
+        let sv = svp_exact(&basis, &w).unwrap();
+
+        // Should be [1, 1, 1]
+        assert_eq!(norm_sq(&sv), 3);
+    }
+
+    #[test]
+    fn test_cvp_exact_in_lattice() {
+        // If the target is exactly a lattice point, the distance should be 0
+        let basis = vec![vec![2, 0], vec![0, 2]];
+        let w = eye(2);
+        let target = vec![4, 6];
+
+        let closest = cvp_exact(&target, &basis, &w).unwrap();
+        assert_eq!(closest, vec![4, 6]);
+    }
+
+    #[test]
+    fn test_cvp_exact_halfway() {
+        let basis = vec![vec![2, 0], vec![0, 2]];
+        let w = eye(2);
+
+        // Target is directly in the middle of a 2x2 square cell [2, 0] to [4, 2]
+        let target = vec![3, 1];
+        let closest = cvp_exact(&target, &basis, &w).unwrap();
+
+        // Distance from [3, 1] to any corner of its cell ([2,0], [4,0], [2,2], [4,2]) is exactly 2.
+        let dist = norm_sq(&[closest[0] - target[0], closest[1] - target[1]]);
+        assert_eq!(dist, 2);
+    }
+
+    #[test]
+    fn svp_cvp_dims() {
+        let basis = vec![vec![1, 0], vec![0, 1], vec![0, 1]];
+        let w = eye(3);
+        let res = svp_exact(&basis, &w);
+        assert!(matches!(res, Err(DiophantineError::InvalidDimensions(_))));
+
+        let target = vec![1, 2, 3, 4];
+        let basis = eye(3);
+        let w = eye(3);
+        let res = cvp_exact(&target, &basis, &w);
+        assert!(matches!(res, Err(DiophantineError::InvalidDimensions(_))));
+    }
 }
 
 #[cfg(test)]
@@ -388,6 +679,10 @@ mod proptests {
     use super::*;
     use crate::{eye, integer_det, solve_diophantine, transpose};
     use proptest::prelude::*;
+
+    fn norm_sq(v: &[i64]) -> i64 {
+        v.iter().map(|x| x * x).sum()
+    }
 
     fn matrix(rows: usize, cols: usize, max_val: i64) -> impl Strategy<Value = Matrix<i64>> {
         proptest::collection::vec(proptest::collection::vec(-max_val..max_val, cols), rows)
@@ -499,6 +794,75 @@ mod proptests {
                     "Error vector projection onto GS vector {} exceeds 0.5: {}", i, mu_err
                 );
             }
+        }
+        #[test]
+        fn test_svp_exact_properties(basis in random_basis()) {
+            let det_orig = integer_det(&basis).unwrap_or(0);
+            prop_assume!(det_orig != 0);
+
+            let n = basis.len();
+            let w = eye(n);
+
+            // LLL-reduce first
+            let reduced = lll(&basis, 0.99, &w).unwrap();
+            let svp_res = svp_exact(&reduced, &w).unwrap();
+
+            // Result must be non-zero
+            prop_assert!(svp_res.iter().any(|&x| x != 0), "SVP exact returned the zero vector!");
+
+            let svp_norm = norm_sq(&svp_res);
+            let lll_first_norm = norm_sq(&reduced[0]);
+
+            // SVP must find a vector at least as short as LLL's best approximation
+            prop_assert!(
+                svp_norm <= lll_first_norm,
+                "SVP exact found a longer vector ({}) than LLL ({})", svp_norm, lll_first_norm
+            );
+
+            // Must be a valid lattice point
+            let red_t = transpose(&reduced);
+            let mut svp_t = vec![vec![0; 1]; n];
+            for i in 0..n {
+                svp_t[i][0] = svp_res[i];
+            }
+            let sol = solve_diophantine(&red_t, &svp_t);
+            prop_assert!(sol.is_ok(), "SVP exact result is not in the lattice!");
+        }
+
+        #[test]
+        fn test_cvp_exact_properties((basis, target) in random_basis_target()) {
+            let det_orig = integer_det(&basis).unwrap_or(0);
+            prop_assume!(det_orig != 0);
+
+            let n = basis.len();
+            let w = eye(n);
+
+            // Perform CVP on a reduced basis
+            let reduced = lll(&basis, 0.99, &w).unwrap();
+
+            let cvp_res = cvp_exact(&target, &reduced, &w).unwrap();
+            let babai_res = nearest_plane(&target, &reduced, &w).unwrap();
+
+            let error_cvp: Vec<i64> = target.iter().zip(cvp_res.iter()).map(|(&t, &c)| t - c).collect();
+            let error_babai: Vec<i64> = target.iter().zip(babai_res.iter()).map(|(&t, &c)| t - c).collect();
+
+            let dist_cvp = norm_sq(&error_cvp);
+            let dist_babai = norm_sq(&error_babai);
+
+            // Exact CVP must always yield a distance <= the approximate Babai's nearest plane distance
+            prop_assert!(
+                dist_cvp <= dist_babai,
+                "Exact CVP yielded worse distance {} than Babai's approximate {}", dist_cvp, dist_babai
+            );
+
+            // Must be a valid lattice point (Linear combination of the reduced basis)
+            let red_t = transpose(&reduced);
+            let mut cvp_t = vec![vec![0; 1]; n];
+            for i in 0..n {
+                cvp_t[i][0] = cvp_res[i];
+            }
+            let sol = solve_diophantine(&red_t, &cvp_t);
+            prop_assert!(sol.is_ok(), "CVP exact result is not in the lattice!");
         }
     }
 }

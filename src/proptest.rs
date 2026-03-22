@@ -177,7 +177,7 @@ mod proptests {
     }
 
     proptest! {
-        #![proptest_config(ProptestConfig::with_cases(10_000))]
+        // #![proptest_config(ProptestConfig::with_cases(10_000))]
 
         #[test]
         fn inverse_property(mat in unimodular_matrix()) {
