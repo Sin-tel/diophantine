@@ -39,6 +39,11 @@
 //! results are produced in release mode. Extensive property testing is used to guarantee
 //! the algorithms are correct and free of panics.
 
+// TODO: Implement Schnorr-Euchner (both SVP / CVP)
+// TODO: add k-shortest vectors
+// TODO: optional BigInt support (malachite)
+// TODO: optional ndarray integration
+
 #![warn(missing_docs)]
 #![warn(missing_debug_implementations)]
 #![warn(rust_2018_idioms)]
@@ -64,8 +69,8 @@
 
 mod error;
 mod hnf;
+mod lattice;
 mod linalg;
-mod lll;
 mod util;
 
 #[cfg(test)]
@@ -73,8 +78,8 @@ mod proptest;
 
 pub use crate::error::*;
 pub use crate::hnf::*;
+pub use crate::lattice::*;
 pub use crate::linalg::*;
-pub use crate::lll::*;
 
 /// Type alias for a Matrix (row-major)
 pub type Matrix<T> = Vec<Vec<T>>;

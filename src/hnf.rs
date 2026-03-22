@@ -14,7 +14,6 @@ pub fn hnf(basis: &Matrix<i64>) -> Result<Matrix<i64>, DiophantineError> {
 fn apply_row_operation(
     a: &mut Matrix<i64>,
     k: i64,
-
     i: usize,
     si: usize,
 ) -> Result<(), DiophantineError> {
@@ -242,6 +241,15 @@ mod tests {
         // is Z^2 itself.
         let saturated = saturation(&m).unwrap();
         assert_eq!(saturated, vec![vec![1, 0], vec![0, 1]]);
+    }
+
+    #[test]
+    fn test_saturation_hidden() {
+        // A slightly more complicated example, with a "hidden" factor of 3.
+        let m = vec![vec![3, 0, -1], vec![0, 3, 5]];
+
+        let saturated = saturation(&m).unwrap();
+        assert_eq!(saturated, vec![vec![1, 2, 3], vec![0, 3, 5]]);
     }
 
     #[test]
