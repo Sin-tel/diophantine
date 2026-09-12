@@ -172,7 +172,7 @@ pub fn lll(
 ///
 /// # Arguments
 /// * `v`     - The query vector.
-/// * `delta` - The reduction parameter (typically 0.75 or 0.99).
+/// * `basis` - The lattice basis (row vectors).
 /// * `w` - The quadratic form matrix (weights). Pass Identity matrix for standard Euclidean.
 pub fn nearest_plane(
     v: &[i64],
@@ -187,7 +187,7 @@ pub fn nearest_plane(
         return Ok(vec![]);
     }
 
-    if v.len() != n {
+    if v.len() != m {
         return Err(DiophantineError::InvalidDimensions(
             "Target vector should have same length as basis".to_string(),
         ));
