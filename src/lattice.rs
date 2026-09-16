@@ -106,10 +106,10 @@ pub fn lll(
     let mut basis = basis.clone();
 
     let n = basis.len();
-    let m = basis[0].len();
     if n == 0 {
         return Ok(vec![]);
     }
+    let m = basis[0].len();
 
     if w.len() != m {
         return Err(DiophantineError::InvalidDimensions(
@@ -182,10 +182,10 @@ pub fn nearest_plane(
     let mut b = v.to_vec();
 
     let n = basis.len(); // number of rows
-    let m = basis[0].len(); // number of cols
     if n == 0 {
         return Ok(vec![]);
     }
+    let m = basis[0].len(); // number of cols
 
     if v.len() != m {
         return Err(DiophantineError::InvalidDimensions(

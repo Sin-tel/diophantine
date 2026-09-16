@@ -39,8 +39,6 @@
 //! results are produced in release mode. Extensive property testing is used to guarantee
 //! the algorithms are correct and free of panics.
 
-// TODO: Implement Schnorr-Euchner (both SVP / CVP)
-// TODO: add k-shortest vectors
 // TODO: optional BigInt support (malachite)
 // TODO: optional ndarray integration
 
