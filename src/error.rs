@@ -11,6 +11,8 @@ pub enum DiophantineError {
     NoSolution(String),
     /// An intermediate calculation exceeded the capacity of an `i64`.
     Overflow(&'static str),
+    /// An argument is outside the domain of the requested operation.
+    InvalidArgument(String),
 }
 
 impl fmt::Display for DiophantineError {
@@ -19,6 +21,7 @@ impl fmt::Display for DiophantineError {
             DiophantineError::InvalidDimensions(msg) => write!(f, "Invalid dimensions: {msg}"),
             DiophantineError::NoSolution(msg) => write!(f, "No integer solution: {msg}"),
             DiophantineError::Overflow(msg) => write!(f, "Integer overflow: {msg}"),
+            DiophantineError::InvalidArgument(msg) => write!(f, "Invalid argument: {msg}"),
         }
     }
 }

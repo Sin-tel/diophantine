@@ -227,21 +227,77 @@ pub fn nearest_plane(
     Ok(result)
 }
 
-/// Internal helper for Schnorr-Euchner enumeration.
+/// Slack on an enumeration radius, so that points exactly on the bound survive rounding.
+fn with_tolerance(radius_sq: f64) -> f64 {
+    radius_sq * (1.0 + 1e-9) + 1e-9
+}
+
+/// Compute d^T W d, without allocating.
+fn quad_form(d: &[f64], w: &Matrix<f64>) -> f64 {
+    let mut res = 0.0;
+    for i in 0..d.len() {
+        let mut row = 0.0;
+        for j in 0..d.len() {
+            row += w[i][j] * d[j];
+        }
+        res += d[i] * row;
+    }
+    res
+}
+
+/// Checks that `v`, the rows of `basis` and `w` agree on the ambient dimension.
+fn check_dims(v: &[i64], basis: &Matrix<i64>, w: &Matrix<f64>) -> Result<(), DiophantineError> {
+    let m = v.len();
+    if basis.iter().any(|row| row.len() != m) {
+        return Err(DiophantineError::InvalidDimensions(
+            "Target vector should have same length as basis columns".to_string(),
+        ));
+    }
+    if w.len() != m || w.iter().any(|row| row.len() != m) {
+        return Err(DiophantineError::InvalidDimensions(
+            "W must be square and match basis columns".to_string(),
+        ));
+    }
+    Ok(())
+}
+
+/// Schnorr-Euchner enumeration.
 ///
-/// Returns the integer coefficients of the basis vectors that yield the closest point.
-/// If `nonzero_only` is true, the zero vector is considered an invalid solution (useful for SVP).
-fn schnorr_euchner(
+/// Visits the vectors `x` of the lattice spanned by `basis` with `|v - x|^2_w <= radius_sq`
+/// (up to a small tolerance), in Schnorr-Euchner order: near first, but not sorted.
+/// `visit` gets the coefficients of `x`, `x` itself and `|v - x|^2_w` as computed during
+/// enumeration, and returns the squared radius to continue with: the same to go on,
+/// smaller to tighten, negative to stop.
+///
+/// The rows of `basis` must be linearly independent, and `w` must be definite on their
+/// span. The basis should be reduced for speed.
+pub(crate) fn enumerate<F>(
     v: &[i64],
     basis: &Matrix<i64>,
     w: &Matrix<f64>,
-    nonzero_only: bool,
-) -> Result<Vec<i64>, DiophantineError> {
-    let n = basis.len();
-    if n == 0 {
-        return Ok(vec![]);
+    radius_sq: f64,
+    mut visit: F,
+) -> Result<(), DiophantineError>
+where
+    F: FnMut(&[i64], &[i64], f64) -> Result<f64, DiophantineError>,
+{
+    check_dims(v, basis, w)?;
+    if radius_sq.is_nan() || radius_sq < 0.0 {
+        return Ok(());
     }
-    let m = basis[0].len();
+
+    let n = basis.len();
+    let m = v.len();
+    let v_f64: Vec<f64> = v.iter().map(|&x| x as f64).collect();
+
+    if n == 0 {
+        // The lattice is just the origin
+        let dist = quad_form(&v_f64, w);
+        if dist <= with_tolerance(radius_sq) {
+            visit(&[], &vec![0; m], dist)?;
+        }
+        return Ok(());
+    }
 
     // Compute Gram-Schmidt orthogonalization
     let ortho = gramschmidt(basis, w);
@@ -273,15 +329,21 @@ fn schnorr_euchner(
 
     // Project target vector into the GS basis (theta)
     let mut theta = vec![0.0; n];
-    let v_f64: Vec<f64> = v.iter().map(|&x| x as f64).collect();
     for j in 0..n {
         let num = inner_prod(&v_f64, &ortho[j], w);
         theta[j] = num / b_star_norms[j];
     }
 
+    // The component of v outside the span of the lattice is shared by every lattice point,
+    // so it starts the partial distance stack.
+    let mut outside = v_f64.clone();
+    for j in 0..n {
+        vec_sub_assign(&mut outside, &ortho[j], theta[j]);
+    }
+    let outside_dist = quad_form(&outside, w).max(0.0);
+
     // State setup
-    let mut best_dist = f64::INFINITY;
-    let mut best_x = vec![0i64; n];
+    let mut bound = with_tolerance(radius_sq);
 
     let mut x = vec![0i64; n];
     let mut c = vec![0.0; n];
@@ -289,81 +351,123 @@ fn schnorr_euchner(
     let mut d = vec![0i64; n];
     let mut step = vec![0i64; n];
 
-    let mut k = (n - 1) as isize;
+    // partial[k] = sum of x[i] * basis[i] for i >= k, filled in on the way down
+    let mut partial = vec![vec![0i64; m]; n + 1];
+    let mut point = vec![0i64; m];
 
     // Initialize the root node at level n - 1
-    let ku = k as usize;
-    c[ku] = theta[ku];
-    x[ku] = c[ku].round_ties_even() as i64;
-    let y = c[ku] - x[ku] as f64;
-    step[ku] = if y >= 0.0 { 1 } else { -1 };
-    d[ku] = 1;
-    p[ku] = p[ku + 1] + y * y * b_star_norms[ku];
+    let mut k = n - 1;
+    c[k] = theta[k];
+    x[k] = c[k].round_ties_even() as i64;
+    let y = c[k] - x[k] as f64;
+    step[k] = if y >= 0.0 { 1 } else { -1 };
+    d[k] = 1;
+    p[n] = outside_dist;
+    p[k] = p[k + 1] + y * y * b_star_norms[k];
 
     // Depth-first search
-    while k < n as isize {
-        let ku = k as usize;
-
-        // If partial distance is strictly less than the best found distance, move deeper
-        if p[ku] < best_dist {
+    loop {
+        if p[k] <= bound {
             if k == 0 {
                 // Reached a leaf node (a complete lattice point)
-                let valid = if nonzero_only {
-                    x.iter().any(|&xi| xi != 0)
-                } else {
-                    true
-                };
-
-                if valid {
-                    best_dist = p[ku];
-                    best_x.copy_from_slice(&x);
+                for j in 0..m {
+                    point[j] = x[0]
+                        .checked_mul(basis[0][j])
+                        .and_then(|t| t.checked_add(partial[1][j]))
+                        .ok_or(DiophantineError::Overflow("enumerate: lattice vector"))?;
                 }
-
-                // Advance to the next integer coefficient at this leaf node
-                x[ku] += step[ku] * d[ku];
-                step[ku] = -step[ku];
-                d[ku] += 1;
-                let y = c[ku] - x[ku] as f64;
-                p[ku] = p[ku + 1] + y * y * b_star_norms[ku];
+                let r = visit(&x, &point, p[0])?;
+                if r.is_nan() || r < 0.0 {
+                    return Ok(());
+                }
+                bound = with_tolerance(r);
             } else {
                 // Internal node: step down to level k - 1
-                k -= 1;
-                let ku = k as usize;
-
-                let mut sum = 0.0;
-                for i in (ku + 1)..n {
-                    sum += x[i] as f64 * mu_mat[i][ku];
+                for j in 0..m {
+                    partial[k][j] = x[k]
+                        .checked_mul(basis[k][j])
+                        .and_then(|t| t.checked_add(partial[k + 1][j]))
+                        .ok_or(DiophantineError::Overflow("enumerate: lattice vector"))?;
                 }
-                c[ku] = theta[ku] - sum;
-                x[ku] = c[ku].round_ties_even() as i64;
 
-                let y = c[ku] - x[ku] as f64;
-                step[ku] = if y >= 0.0 { 1 } else { -1 };
-                d[ku] = 1;
-                p[ku] = p[ku + 1] + y * y * b_star_norms[ku];
+                k -= 1;
+                let mut sum = 0.0;
+                for i in (k + 1)..n {
+                    sum += x[i] as f64 * mu_mat[i][k];
+                }
+                c[k] = theta[k] - sum;
+                x[k] = c[k].round_ties_even() as i64;
+
+                let y = c[k] - x[k] as f64;
+                step[k] = if y >= 0.0 { 1 } else { -1 };
+                d[k] = 1;
+                p[k] = p[k + 1] + y * y * b_star_norms[k];
+                continue;
             }
         } else {
             // Prune current branch: step back up to level k + 1
             k += 1;
-            if k < n as isize {
-                let ku = k as usize;
-                // Prepare the next alternating coefficient in SE order
-                x[ku] += step[ku] * d[ku];
-                step[ku] = -step[ku];
-                d[ku] += 1;
-
-                let y = c[ku] - x[ku] as f64;
-                p[ku] = p[ku + 1] + y * y * b_star_norms[ku];
+            if k == n {
+                return Ok(());
             }
+        }
+
+        // Advance to the next integer coefficient at level k, in alternating SE order
+        x[k] += step[k] * d[k];
+        step[k] = -step[k];
+        d[k] += 1;
+        let y = c[k] - x[k] as f64;
+        p[k] = p[k + 1] + y * y * b_star_norms[k];
+    }
+}
+
+/// The `k` best vectors found so far, best first, ordered by score and then by the vector.
+struct TopK<S> {
+    k: usize,
+    items: Vec<(S, Vec<i64>)>,
+}
+
+impl<S: PartialOrd + Copy> TopK<S> {
+    fn new(k: usize) -> Self {
+        TopK {
+            k,
+            items: Vec::with_capacity(k),
         }
     }
 
-    Ok(best_x)
+    fn insert(&mut self, x: &[i64], score: S) {
+        // How a kept item compares to the new one
+        let cmp = |(s, y): &(S, Vec<i64>)| {
+            s.partial_cmp(&score)
+                .unwrap_or(std::cmp::Ordering::Equal)
+                .then_with(|| y.as_slice().cmp(x))
+        };
+        if self.items.len() >= self.k && self.items.last().is_none_or(|last| cmp(last).is_le()) {
+            return;
+        }
+        let pos = self.items.partition_point(|item| cmp(item).is_lt());
+        self.items.insert(pos, (score, x.to_vec()));
+        self.items.truncate(self.k);
+    }
+
+    /// The squared radius that still holds every candidate for the list, computed from the
+    /// worst kept score by `radius_sq`. Infinite until the list is full.
+    fn radius_sq(&self, radius_sq: impl Fn(S) -> f64) -> f64 {
+        match self.items.last() {
+            Some((s, _)) if self.items.len() >= self.k => radius_sq(*s),
+            _ => f64::INFINITY,
+        }
+    }
+
+    fn into_vecs(self) -> Matrix<i64> {
+        self.items.into_iter().map(|(_, x)| x).collect()
+    }
 }
 
 /// Exact Closest Vector Problem (CVP) using Schnorr-Euchner enumeration.
 ///
 /// Returns the exact closest vector in the lattice to the target vector `v`.
+/// Ties are broken by the vector itself (lexicographically smallest).
 /// For reasonable performance, `basis` MUST be highly reduced (e.g., LLL or BKZ) before calling.
 ///
 /// # Arguments
@@ -375,73 +479,146 @@ pub fn cvp_exact(
     basis: &Matrix<i64>,
     w: &Matrix<f64>,
 ) -> Result<Vec<i64>, DiophantineError> {
-    let n = basis.len();
-    if n == 0 {
+    Ok(cvp_top_k(v, basis, w, 1)?.swap_remove(0))
+}
+
+/// The `k` vectors of the lattice closest to the target `v` under the quadratic form `w`,
+/// closest first. Ties are broken by the vector itself (lexicographically smallest first),
+/// so the result does not depend on the choice of basis.
+///
+/// Returns fewer than `k` vectors only if the basis is empty (the lattice is just the origin).
+/// For reasonable performance, `basis` should be reduced (e.g. LLL) under `w`, and `k` small.
+///
+/// # Arguments
+/// * `v` - The target vector (should match the number of columns in the basis).
+/// * `basis` - The lattice basis (row vectors), linearly independent.
+/// * `w` - The metric quadratic form matrix (weights), definite on the span of `basis`.
+/// * `k` - The number of vectors to return.
+pub fn cvp_top_k(
+    v: &[i64],
+    basis: &Matrix<i64>,
+    w: &Matrix<f64>,
+    k: usize,
+) -> Result<Matrix<i64>, DiophantineError> {
+    check_dims(v, basis, w)?;
+    if k == 0 {
         return Ok(vec![]);
     }
-    let m = basis[0].len();
 
-    if v.len() != m {
-        return Err(DiophantineError::InvalidDimensions(
-            "Target vector should have same length as basis columns".to_string(),
-        ));
-    }
-    if w.len() != m || w[0].len() != m {
-        return Err(DiophantineError::InvalidDimensions(
-            "W must be square and match basis columns".to_string(),
-        ));
-    }
-
-    let best_x = schnorr_euchner(v, basis, w, false)?;
-
-    // Linearly combine the basic vectors according to best_x coefficients
-    let mut result = vec![0; m];
-    for i in 0..n {
-        if best_x[i] != 0 {
-            for j in 0..m {
-                result[j] += best_x[i] * basis[i][j];
-            }
+    let mut top = TopK::new(k);
+    let mut diff = vec![0.0; v.len()];
+    enumerate(v, basis, w, f64::INFINITY, |_, x, _| {
+        for j in 0..v.len() {
+            let dj = v[j]
+                .checked_sub(x[j])
+                .ok_or(DiophantineError::Overflow("cvp_top_k: difference"))?;
+            diff[j] = dj as f64;
         }
+        top.insert(x, quad_form(&diff, w));
+        Ok(top.radius_sq(|s| s))
+    })?;
+
+    Ok(top.into_vecs())
+}
+
+/// The `k` vectors `x` of the lattice for which `v - x` is smallest under the weighted
+/// L1 norm `sum weights[i] * |(v - x)[i]|`, best first. Ties are broken by the weighted
+/// L2 norm `sum (weights[i] * (v - x)[i])^2`, then by `x` itself (lexicographically smallest
+/// first), so the result does not depend on the choice of basis.
+///
+/// Weights must be non-negative and may be zero, as long as no nonzero lattice vector has
+/// zero weighted norm. For reasonable performance, `basis` should be reduced (e.g. LLL)
+/// under `diag(weights^2)`, and `k` small.
+///
+/// Returns fewer than `k` vectors only if the basis is empty (the lattice is just the origin).
+///
+/// # Arguments
+/// * `v` - The target vector (should match the number of columns in the basis).
+/// * `basis` - The lattice basis (row vectors), linearly independent.
+/// * `weights` - The weight of each coordinate.
+/// * `k` - The number of vectors to return.
+pub fn cvp_l1_top_k(
+    v: &[i64],
+    basis: &Matrix<i64>,
+    weights: &[i64],
+    k: usize,
+) -> Result<Matrix<i64>, DiophantineError> {
+    let m = v.len();
+    if weights.len() != m {
+        return Err(DiophantineError::InvalidDimensions(
+            "Weights should have same length as target vector".to_string(),
+        ));
+    }
+    if weights.iter().any(|&wi| wi < 0) {
+        return Err(DiophantineError::InvalidArgument(
+            "Weights must be non-negative".to_string(),
+        ));
     }
 
-    Ok(result)
+    // The weighted L2 norm is at most the weighted L1 norm, so every candidate at least as
+    // good as the current k-th best lies in the L2 ball of that radius under diag(weights^2).
+    let mut w = vec![vec![0.0; m]; m];
+    for i in 0..m {
+        w[i][i] = (weights[i] as f64).powi(2);
+    }
+    check_dims(v, basis, &w)?;
+    if k == 0 {
+        return Ok(vec![]);
+    }
+
+    let mut top = TopK::new(k);
+    enumerate(v, basis, &w, f64::INFINITY, |_, x, _| {
+        let mut l1: i64 = 0;
+        let mut l2: i64 = 0;
+        for j in 0..m {
+            let wd = v[j]
+                .checked_sub(x[j])
+                .and_then(|dj| dj.checked_mul(weights[j]))
+                .ok_or(DiophantineError::Overflow("cvp_l1_top_k: norm"))?;
+            l1 = wd
+                .checked_abs()
+                .and_then(|a| l1.checked_add(a))
+                .ok_or(DiophantineError::Overflow("cvp_l1_top_k: norm"))?;
+            l2 = wd
+                .checked_mul(wd)
+                .and_then(|s| l2.checked_add(s))
+                .ok_or(DiophantineError::Overflow("cvp_l1_top_k: norm"))?;
+        }
+        top.insert(x, (l1, l2));
+        Ok(top.radius_sq(|(l1, _)| (l1 as f64).powi(2)))
+    })?;
+
+    Ok(top.into_vecs())
 }
 
 /// Exact Shortest Vector Problem (SVP) using Schnorr-Euchner enumeration.
 ///
 /// Returns the exact shortest **non-zero** vector in the lattice.
+/// Ties are broken by the vector itself (lexicographically smallest).
 /// For reasonable performance, `basis` MUST be highly reduced (e.g., LLL or BKZ) before calling.
 ///
 /// # Arguments
 /// * `basis` - The lattice basis (row vectors).
 /// * `w` - The metric quadratic form matrix (weights).
 pub fn svp_exact(basis: &Matrix<i64>, w: &Matrix<f64>) -> Result<Vec<i64>, DiophantineError> {
-    let n = basis.len();
-    if n == 0 {
+    let Some(first) = basis.first() else {
         return Ok(vec![]);
-    }
-    let m = basis[0].len();
+    };
+    let origin = vec![0; first.len()];
 
-    if w.len() != m || w[0].len() != m {
-        return Err(DiophantineError::InvalidDimensions(
-            "W must be square and match basis columns".to_string(),
-        ));
-    }
-
-    // SVP is precisely CVP centering around the origin with a strict constraint of non-zero coordinates
-    let origin = vec![0; m];
-    let best_x = schnorr_euchner(&origin, basis, w, true)?;
-
-    let mut result = vec![0; m];
-    for i in 0..n {
-        if best_x[i] != 0 {
-            for j in 0..m {
-                result[j] += best_x[i] * basis[i][j];
+    let mut top = TopK::new(1);
+    let mut x_f64 = vec![0.0; origin.len()];
+    enumerate(&origin, basis, w, f64::INFINITY, |coeffs, x, _| {
+        if coeffs.iter().any(|&c| c != 0) {
+            for (xf, &xi) in x_f64.iter_mut().zip(x) {
+                *xf = xi as f64;
             }
+            top.insert(x, quad_form(&x_f64, w));
         }
-    }
+        Ok(top.radius_sq(|s| s))
+    })?;
 
-    Ok(result)
+    Ok(top.into_vecs().pop().unwrap_or_default())
 }
 
 #[cfg(test)]
@@ -660,6 +837,91 @@ mod tests {
     }
 
     #[test]
+    fn cvp_top_k_ties() {
+        // The four corners of the cell are equally close, and come out ordered by vector
+        let basis = vec![vec![2, 0], vec![0, 2]];
+        let target = vec![1, 1];
+        let expected = vec![vec![0, 0], vec![0, 2], vec![2, 0], vec![2, 2]];
+
+        assert_eq!(cvp_top_k(&target, &basis, &eye(2), 4).unwrap(), expected);
+        assert_eq!(cvp_l1_top_k(&target, &basis, &[1, 1], 4).unwrap(), expected);
+        assert_eq!(cvp_exact(&target, &basis, &eye(2)).unwrap(), vec![0, 0]);
+    }
+
+    #[test]
+    fn cvp_l1_differs_from_l2() {
+        // From (3, 0), the lattice point (0, 0) is off by (3, 0) and (1, -2) by (2, 2):
+        // L1 distances 3 and 4, but L2 distances 9 and 8.
+        let basis = vec![vec![1, -2]];
+        let target = vec![3, 0];
+        let res = cvp_l1_top_k(&target, &basis, &[1, 1], 2).unwrap();
+        assert_eq!(res, vec![vec![0, 0], vec![1, -2]]);
+        let res = cvp_top_k(&target, &basis, &eye(2), 2).unwrap();
+        assert_eq!(res, vec![vec![1, -2], vec![0, 0]]);
+    }
+
+    #[test]
+    fn cvp_top_k_outside_span() {
+        // Lattice spanned by (1, 0, 0) and (0, 1, 0), target off the plane
+        let basis = vec![vec![1, 0, 0], vec![0, 1, 0]];
+        let target = vec![3, -2, 7];
+        let res = cvp_top_k(&target, &basis, &eye(3), 5).unwrap();
+        assert_eq!(res[0], vec![3, -2, 0]);
+        assert_eq!(res.len(), 5);
+        let res = cvp_l1_top_k(&target, &basis, &[1, 1, 1], 5).unwrap();
+        assert_eq!(res[0], vec![3, -2, 0]);
+        assert_eq!(res.len(), 5);
+    }
+
+    #[test]
+    fn cvp_l1_zero_weight() {
+        // Vectors (a, a + b, b): only zero has zero weight under (0, 1, 2)
+        let basis = vec![vec![1, 1, 0], vec![0, 1, 1]];
+        let target = vec![10, 3, 1];
+        let res = cvp_l1_top_k(&target, &basis, &[0, 1, 2], 3).unwrap();
+        // (2, 3, 1) is a lattice point with weighted distance 0
+        assert_eq!(res[0], vec![2, 3, 1]);
+        assert_eq!(res.len(), 3);
+    }
+
+    #[test]
+    fn top_k_edge_cases() {
+        let basis = vec![vec![1, 0], vec![0, 1]];
+        let target = vec![1, 2];
+        assert!(cvp_top_k(&target, &basis, &eye(2), 0).unwrap().is_empty());
+        assert!(
+            cvp_l1_top_k(&target, &basis, &[1, 1], 0)
+                .unwrap()
+                .is_empty()
+        );
+
+        // Rank 0: the lattice is just the origin
+        let empty: Matrix<i64> = vec![];
+        assert_eq!(
+            cvp_top_k(&target, &empty, &eye(2), 3).unwrap(),
+            vec![vec![0, 0]]
+        );
+        assert_eq!(
+            cvp_l1_top_k(&target, &empty, &[1, 1], 3).unwrap(),
+            vec![vec![0, 0]]
+        );
+        assert_eq!(cvp_exact(&target, &empty, &eye(2)).unwrap(), vec![0, 0]);
+
+        // Rank 1, many more points than a small box
+        let line = vec![vec![1, 1]];
+        let res = cvp_top_k(&[0, 0], &line, &eye(2), 7).unwrap();
+        assert_eq!(res.len(), 7);
+        assert_eq!(res[0], vec![0, 0]);
+        assert_eq!(res[5], vec![-3, -3]);
+        assert_eq!(res[6], vec![3, 3]);
+
+        let res = cvp_l1_top_k(&target, &basis, &[1, -1], 1);
+        assert!(matches!(res, Err(DiophantineError::InvalidArgument(_))));
+        let res = cvp_l1_top_k(&target, &basis, &[1, 1, 1], 1);
+        assert!(matches!(res, Err(DiophantineError::InvalidDimensions(_))));
+    }
+
+    #[test]
     fn svp_cvp_dims() {
         let basis = vec![vec![1, 0], vec![0, 1], vec![0, 1]];
         let w = eye(3);
@@ -701,6 +963,141 @@ mod proptests {
             target in proptest::collection::vec(-100i64..100, n),
         ) -> (Matrix<i64>, Vec<i64>) {
             (basis, target)
+        }
+    }
+
+    /// B diag(q) B^T, exact
+    fn weighted_gram(basis: &Matrix<i64>, q: &[i64]) -> Matrix<i64> {
+        basis
+            .iter()
+            .map(|a| {
+                basis
+                    .iter()
+                    .map(|b| (0..q.len()).map(|j| a[j] * q[j] * b[j]).sum())
+                    .collect()
+            })
+            .collect()
+    }
+
+    fn combine(coeffs: &[i64], basis: &Matrix<i64>, m: usize) -> Vec<i64> {
+        let mut x = vec![0; m];
+        for (c, row) in coeffs.iter().zip(basis) {
+            for j in 0..m {
+                x[j] += c * row[j];
+            }
+        }
+        x
+    }
+
+    /// The top `k` of the lattice points with coefficients within `r` of `center`, together
+    /// with `extra`, ordered by `score` and then by the vector.
+    fn bruteforce_top_k<S: Ord>(
+        basis: &Matrix<i64>,
+        m: usize,
+        center: &[i64],
+        r: i64,
+        extra: &Matrix<i64>,
+        k: usize,
+        score: impl Fn(&[i64]) -> S,
+    ) -> Matrix<i64> {
+        let n = basis.len();
+        let mut points = extra.clone();
+        let mut coeffs: Vec<i64> = center.iter().map(|c| c - r).collect();
+        loop {
+            points.push(combine(&coeffs, basis, m));
+            let Some(i) = (0..n).find(|&i| coeffs[i] < center[i] + r) else {
+                break;
+            };
+            coeffs[i] += 1;
+            for c in 0..i {
+                coeffs[c] = center[c] - r;
+            }
+        }
+        points.sort_by(|a, b| score(a).cmp(&score(b)).then_with(|| a.cmp(b)));
+        points.dedup();
+        points.truncate(k);
+        points
+    }
+
+    /// A basis of `n <= m` rows, the coefficients of a lattice point near the target,
+    /// the target, diagonal weights (possibly zero) and `k`.
+    fn cvp_case() -> impl Strategy<Value = (Matrix<i64>, Vec<i64>, Vec<i64>, Vec<i64>, usize)> {
+        (1usize..=4)
+            .prop_flat_map(|m| (1..=m, Just(m)))
+            .prop_flat_map(|(n, m)| {
+                (
+                    matrix(n, m, 6),
+                    proptest::collection::vec(-3i64..=3, n),
+                    proptest::collection::vec(-4i64..=4, m),
+                    proptest::collection::vec(0i64..=3, m),
+                    1usize..=6,
+                )
+            })
+            .prop_map(|(basis, center, noise, weights, k)| {
+                let m = noise.len();
+                let target: Vec<i64> = combine(&center, &basis, m)
+                    .iter()
+                    .zip(&noise)
+                    .map(|(x, e)| x + e)
+                    .collect();
+                (basis, center, target, weights, k)
+            })
+    }
+
+    proptest! {
+        #![proptest_config(ProptestConfig::with_cases(2_000))]
+
+        #[test]
+        fn test_cvp_top_k_brute_force((basis, center, target, weights, k) in cvp_case()) {
+            let m = target.len();
+            let q: Vec<i64> = weights.iter().map(|w| w * w).collect();
+            prop_assume!(integer_det(&weighted_gram(&basis, &q)).unwrap_or(0) != 0);
+
+            let mut w = vec![vec![0.0; m]; m];
+            for i in 0..m {
+                w[i][i] = q[i] as f64;
+            }
+            let l2 = |x: &[i64]| -> i64 {
+                (0..m).map(|j| q[j] * (target[j] - x[j]).pow(2)).sum()
+            };
+            let l1 = |x: &[i64]| -> (i64, i64) {
+                let a = (0..m).map(|j| weights[j] * (target[j] - x[j]).abs()).sum();
+                (a, l2(x))
+            };
+
+            let reduced = lll(&basis, 0.99, &w).unwrap();
+
+            for b in [&basis, &reduced] {
+                let res = cvp_top_k(&target, b, &w, k).unwrap();
+                let brute = bruteforce_top_k(&basis, m, &center, 4, &res, k, l2);
+                prop_assert_eq!(&res, &brute, "L2 top-k differs from brute force");
+
+                let res = cvp_l1_top_k(&target, b, &weights, k).unwrap();
+                let brute = bruteforce_top_k(&basis, m, &center, 4, &res, k, l1);
+                prop_assert_eq!(&res, &brute, "L1 top-k differs from brute force");
+            }
+        }
+
+        #[test]
+        fn test_cvp_top_k_basis_independent((basis, target) in random_basis_target(), k in 1usize..=8) {
+            prop_assume!(integer_det(&basis).unwrap_or(0) != 0);
+            let n = basis.len();
+            let w = eye(n);
+            let weights = vec![1; n];
+            let reduced = lll(&basis, 0.99, &w).unwrap();
+
+            prop_assert_eq!(
+                cvp_top_k(&target, &basis, &w, k).unwrap(),
+                cvp_top_k(&target, &reduced, &w, k).unwrap()
+            );
+            prop_assert_eq!(
+                cvp_l1_top_k(&target, &basis, &weights, k).unwrap(),
+                cvp_l1_top_k(&target, &reduced, &weights, k).unwrap()
+            );
+            prop_assert_eq!(
+                cvp_top_k(&target, &reduced, &w, 1).unwrap()[0].clone(),
+                cvp_exact(&target, &reduced, &w).unwrap()
+            );
         }
     }
 

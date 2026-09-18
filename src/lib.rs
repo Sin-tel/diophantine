@@ -9,7 +9,9 @@
 //! * Exact determinants & inverses.
 //! * Hermite Normal Form (HNF): Compute the HNF and extended HNF of integer matrices.
 //! * Lattice reduction: Lenstra–Lenstra–Lovász (LLL) basis reduction.
-//! * Closest Vector Problem (CVP): Babai's Nearest Plane algorithm for approximate CVP.
+//! * Closest Vector Problem (CVP): Babai's Nearest Plane algorithm for approximate CVP,
+//!   and exact Schnorr-Euchner enumeration for CVP, SVP and the `k` closest vectors,
+//!   under a quadratic form or a weighted L1 norm.
 //! * Nullspaces: Compute exact left and right integer kernels of matrices.
 //!
 //! # Example: Solving a system of linear Diophantine equations
