@@ -939,11 +939,24 @@ mod tests {
 #[cfg(test)]
 mod proptests {
     use super::*;
-    use crate::{eye, integer_det, solve_diophantine, transpose};
+    use crate::{eye, integer_det};
     use proptest::prelude::*;
 
     fn norm_sq(v: &[i64]) -> i64 {
         v.iter().map(|x| x * x).sum()
+    }
+
+    /// Whether `x` is an integer combination of the rows of the square, nonsingular `basis`.
+    ///
+    /// By Cramer's rule the coefficients are `det(B_i) / det(B)`, where `B_i` is `basis` with
+    /// row `i` replaced by `x`. Exact, and unlike HNF it has no coefficient growth.
+    fn in_lattice(x: &[i64], basis: &Matrix<i64>) -> bool {
+        let det = integer_det(basis).unwrap();
+        (0..basis.len()).all(|i| {
+            let mut b_i = basis.clone();
+            b_i[i] = x.to_vec();
+            integer_det(&b_i).unwrap() % det == 0
+        })
     }
 
     fn matrix(rows: usize, cols: usize, max_val: i64) -> impl Strategy<Value = Matrix<i64>> {
@@ -1019,20 +1032,29 @@ mod proptests {
         points
     }
 
-    /// A basis of `n <= m` rows, the coefficients of a lattice point near the target,
-    /// the target, diagonal weights (possibly zero) and `k`.
+    /// A basis of `n <= m` independent rows, the coefficients of a lattice point near the
+    /// target, the target, diagonal weights (possibly zero) definite on the span, and `k`.
     fn cvp_case() -> impl Strategy<Value = (Matrix<i64>, Vec<i64>, Vec<i64>, Vec<i64>, usize)> {
         (1usize..=4)
             .prop_flat_map(|m| (1..=m, Just(m)))
             .prop_flat_map(|(n, m)| {
+                // A zero weight can only be definite on the span if the span is not everything
+                let min_weight = if n < m { 0i64 } else { 1 };
                 (
                     matrix(n, m, 6),
                     proptest::collection::vec(-3i64..=3, n),
                     proptest::collection::vec(-4i64..=4, m),
-                    proptest::collection::vec(0i64..=3, m),
+                    proptest::collection::vec(min_weight..=3, m),
                     1usize..=6,
                 )
             })
+            .prop_filter(
+                "form must be definite on the span",
+                |(basis, _, _, weights, _)| {
+                    let q: Vec<i64> = weights.iter().map(|w| w * w).collect();
+                    integer_det(&weighted_gram(basis, &q)).unwrap_or(0) != 0
+                },
+            )
             .prop_map(|(basis, center, noise, weights, k)| {
                 let m = noise.len();
                 let target: Vec<i64> = combine(&center, &basis, m)
@@ -1051,7 +1073,6 @@ mod proptests {
         fn test_cvp_top_k_brute_force((basis, center, target, weights, k) in cvp_case()) {
             let m = target.len();
             let q: Vec<i64> = weights.iter().map(|w| w * w).collect();
-            prop_assume!(integer_det(&weighted_gram(&basis, &q)).unwrap_or(0) != 0);
 
             let mut w = vec![vec![0.0; m]; m];
             for i in 0..m {
@@ -1165,15 +1186,7 @@ mod proptests {
             let np = nearest_plane(&target, &reduced, &w).unwrap();
 
             // The result must be a point on the lattice.
-            // We verify this by solving: (reduced^T) * X = (np^T)
-            let red_t = transpose(&reduced);
-            let mut np_t = vec![vec![0; 1]; n];
-            for i in 0..n {
-                np_t[i][0] = np[i];
-            }
-
-            let sol = solve_diophantine(&red_t, &np_t);
-            prop_assert!(sol.is_ok(), "nearest_plane result is not an integer combination of the basis!");
+            prop_assert!(in_lattice(&np, &reduced), "nearest_plane result is not an integer combination of the basis!");
 
             // The error vector must fall within the fundamental parallelepiped
             // of the Gram-Schmidt basis.
@@ -1217,13 +1230,18 @@ mod proptests {
             );
 
             // Must be a valid lattice point
-            let red_t = transpose(&reduced);
-            let mut svp_t = vec![vec![0; 1]; n];
-            for i in 0..n {
-                svp_t[i][0] = svp_res[i];
-            }
-            let sol = solve_diophantine(&red_t, &svp_t);
-            prop_assert!(sol.is_ok(), "SVP exact result is not in the lattice!");
+            prop_assert!(in_lattice(&svp_res, &reduced), "SVP exact result is not in the lattice!");
+
+            // No nonzero point with small coefficients is shorter
+            let box_min = bruteforce_top_k(&reduced, n, &vec![0; n], 2, &vec![], 2, norm_sq)
+                .iter()
+                .map(|x| norm_sq(x))
+                .find(|&s| s != 0)
+                .unwrap();
+            prop_assert!(
+                svp_norm <= box_min,
+                "SVP exact ({}) is longer than a small combination ({})", svp_norm, box_min
+            );
         }
 
         #[test]
@@ -1253,13 +1271,7 @@ mod proptests {
             );
 
             // Must be a valid lattice point (Linear combination of the reduced basis)
-            let red_t = transpose(&reduced);
-            let mut cvp_t = vec![vec![0; 1]; n];
-            for i in 0..n {
-                cvp_t[i][0] = cvp_res[i];
-            }
-            let sol = solve_diophantine(&red_t, &cvp_t);
-            prop_assert!(sol.is_ok(), "CVP exact result is not in the lattice!");
+            prop_assert!(in_lattice(&cvp_res, &reduced), "CVP exact result is not in the lattice!");
         }
     }
 }
