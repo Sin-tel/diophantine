@@ -249,6 +249,18 @@ const PROJECTION_EPS: f64 = 1e-12;
 /// and ties between equidistant points are still ties.
 const EXACT_SCORE_LIMIT: f64 = (1u64 << 52) as f64;
 
+/// Greatest common divisor, non-negative, with `gcd(0, x) = |x|`.
+fn gcd(a: i64, b: i64) -> i64 {
+    let (mut a, mut b) = (a.unsigned_abs(), b.unsigned_abs());
+    while b != 0 {
+        (a, b) = (b, a % b);
+    }
+    // Only `gcd(i64::MIN, 0)` lands on an absolute value an i64 cannot hold; a gcd of
+    // `i64::MIN` with anything else divides that other value and so fits. Capping it there
+    // understates the step, which only ever understates how far a coordinate has to miss by.
+    a.min(i64::MAX as u64) as i64
+}
+
 /// Compute d^T W d, without allocating.
 fn quad_form(d: &[f64], w: &Matrix<f64>) -> f64 {
     let mut res = 0.0;
@@ -307,10 +319,58 @@ pub(crate) fn enumerate<F>(
     w: &Matrix<f64>,
     radius_sq: f64,
     max_nodes: Option<u64>,
+    visit: F,
+) -> Result<bool, DiophantineError>
+where
+    F: FnMut(&[i64], &[i64], f64, &[f64]) -> Result<f64, DiophantineError>,
+{
+    enumerate_inner::<false, _, _>(v, basis, w, radius_sq, max_nodes, |_, _, _| false, visit)
+}
+
+/// [`enumerate`], with a second chance to rule out a branch.
+///
+/// Pruning on the radius alone asks whether a branch can hold a point close enough under
+/// `w`. A caller ranking by something other than `w` gets a weaker question than the one it
+/// cares about, and pays for the gap in nodes. `filter` is asked the caller's own question
+/// at every node, before the branch below it is walked: it gets the level whose coefficients
+/// are now fixed, the part of the target no remaining coefficient can change, and that
+/// part's squared `w`-norm, and returns whether nothing below can be good enough.
+///
+/// Level `k` means the coefficients of rows `k..` are settled and rows `..k` are still free,
+/// so the residual is what is left of `v` after taking off the settled rows and projecting
+/// away the span of the free ones. At a leaf it is the whole difference `v - x`. Returning
+/// `true` drops the branch and the search moves on to the next coefficient at that level; it
+/// never ends the level, which stays the radius' job, so `filter` need not be monotone.
+pub(crate) fn enumerate_filtered<F, P>(
+    v: &[i64],
+    basis: &Matrix<i64>,
+    w: &Matrix<f64>,
+    radius_sq: f64,
+    max_nodes: Option<u64>,
+    filter: P,
+    visit: F,
+) -> Result<bool, DiophantineError>
+where
+    F: FnMut(&[i64], &[i64], f64, &[f64]) -> Result<f64, DiophantineError>,
+    P: FnMut(usize, &[f64], f64) -> bool,
+{
+    enumerate_inner::<true, _, _>(v, basis, w, radius_sq, max_nodes, filter, visit)
+}
+
+/// The body of [`enumerate`] and [`enumerate_filtered`]. `FILTER` says whether the residual
+/// each node is judged on gets maintained at all, which costs a vector update per node.
+fn enumerate_inner<const FILTER: bool, F, P>(
+    v: &[i64],
+    basis: &Matrix<i64>,
+    w: &Matrix<f64>,
+    radius_sq: f64,
+    max_nodes: Option<u64>,
+    mut filter: P,
     mut visit: F,
 ) -> Result<bool, DiophantineError>
 where
     F: FnMut(&[i64], &[i64], f64, &[f64]) -> Result<f64, DiophantineError>,
+    P: FnMut(usize, &[f64], f64) -> bool,
 {
     check_dims(v, basis, w)?;
     if radius_sq.is_nan() || radius_sq < 0.0 {
@@ -385,7 +445,10 @@ where
     // hair off each other, which is enough to break ties between equidistant lattice points
     // differently for different bases. Below that level, take the target to be in the span.
     let v_norm_sq = quad_form(&v_f64, w);
-    let projection: Vec<f64> = if quad_form(&outside, w) <= PROJECTION_EPS * v_norm_sq {
+    let mut outside_dist = quad_form(&outside, w).max(0.0);
+    let projection: Vec<f64> = if outside_dist <= PROJECTION_EPS * v_norm_sq {
+        outside.iter_mut().for_each(|o| *o = 0.0);
+        outside_dist = 0.0;
         v_f64.clone()
     } else {
         v_f64.iter().zip(&outside).map(|(a, b)| a - b).collect()
@@ -403,6 +466,17 @@ where
     let mut partial = vec![vec![0i64; m]; n + 1];
     let mut point = vec![0i64; m];
 
+    // residual[k] = the part of v - x that the coefficients below level k cannot change,
+    // which is the out-of-span part plus what levels k.. have already committed to. Its
+    // squared w-norm is p[k] + outside_dist, so it is the vector behind the radius test, and
+    // it is what `filter` judges a branch on. Only maintained when there is a filter to use
+    // it: it costs a vector update at every node, where the radius test costs nothing.
+    let residual_depth = if FILTER { n + 1 } else { 0 };
+    let mut residual = vec![vec![0.0; m]; residual_depth];
+    if FILTER {
+        residual[n].copy_from_slice(&outside);
+    }
+
     // Initialize the root node at level n - 1
     let mut k = n - 1;
     c[k] = theta[k];
@@ -412,6 +486,12 @@ where
     d[k] = 1;
     p[n] = 0.0;
     p[k] = p[k + 1] + y * y * b_star_norms[k];
+    if FILTER {
+        let (below, above) = residual.split_at_mut(k + 1);
+        for j in 0..m {
+            below[k][j] = above[0][j] + y * ortho[k][j];
+        }
+    }
 
     // Nodes spent so far, and whether the first lattice point is in hand. The budget only
     // applies from then on, so that a caller that asks for very little still gets the
@@ -426,7 +506,8 @@ where
         }
         nodes += 1;
 
-        if p[k] <= bound {
+        // Asking the radius first keeps the cheaper test in front of the more expensive one
+        if p[k] <= bound && !(FILTER && filter(k, &residual[k], p[k] + outside_dist)) {
             if k == 0 {
                 // Reached a leaf node (a complete lattice point)
                 for j in 0..m {
@@ -462,9 +543,15 @@ where
                 step[k] = if y >= 0.0 { 1 } else { -1 };
                 d[k] = 1;
                 p[k] = p[k + 1] + y * y * b_star_norms[k];
+                if FILTER {
+                    let (below, above) = residual.split_at_mut(k + 1);
+                    for j in 0..m {
+                        below[k][j] = above[0][j] + y * ortho[k][j];
+                    }
+                }
                 continue;
             }
-        } else {
+        } else if p[k] > bound {
             // Prune current branch: step back up to level k + 1
             k += 1;
             if k == n {
@@ -478,6 +565,12 @@ where
         d[k] += 1;
         let y = c[k] - x[k] as f64;
         p[k] = p[k + 1] + y * y * b_star_norms[k];
+        if FILTER {
+            let (below, above) = residual.split_at_mut(k + 1);
+            for j in 0..m {
+                below[k][j] = above[0][j] + y * ortho[k][j];
+            }
+        }
     }
 }
 
@@ -553,7 +646,11 @@ impl<S: PartialOrd + Copy> TopK<S> {
 /// Returns the closest vector in the lattice to the target vector `v`, and whether the
 /// search completed. If it did, the vector is exactly the closest one, with ties broken by
 /// the vector itself (lexicographically smallest); if `max_nodes` ran out first, it is the
-/// closest one found so far, which is never worse than [`nearest_plane`] would give.
+/// closest one found so far, starting from the point Babai's nearest plane arrives at, which
+/// the search always reaches. That is a point [`nearest_plane`] could return rather than
+/// always the one it does return: where rounding a coefficient is an exact tie the two may
+/// split it differently, and the vectors that follow are equally good under `w` but need not
+/// be equally good under anything else.
 ///
 /// For reasonable performance, `basis` MUST be highly reduced (e.g., LLL or BKZ) before calling.
 ///
@@ -681,9 +778,21 @@ pub fn cvp_top_k(
 /// under `diag(weights^2)`, and `k` small.
 ///
 /// Returns whether the search completed as well; see [`cvp_top_k`] for what `max_nodes`
-/// does and what an incomplete search means. Note that this enumerates an L2 ball wide
-/// enough to hold the L1 ball, so it visits many more nodes than [`cvp_top_k`] does at the
-/// same dimension, and a budget bites correspondingly sooner.
+/// does and what an incomplete search means.
+///
+/// # Cost
+/// Pruning happens under `diag(weights^2)`, so the search walks an L2 ball wide enough to
+/// hold the L1 ball it wants. No ellipsoid holds that ball more tightly, so some of the gap
+/// is not removable, and this visits more nodes than [`cvp_top_k`] does at the same
+/// dimension: around 20 times as many at dimension 9, growing with dimension.
+///
+/// One case is worse than that. A target far outside the span of `basis` is a large
+/// distance that every lattice point pays alike, and squaring it to reach a radius turns a
+/// small difference between points into a large one. Where the lattice cannot reach a
+/// coordinate at all, that part is recognised and taken out, which is the usual shape of a
+/// target with an extra coordinate the lattice does not span. Where the direction out of
+/// the span is not a coordinate, it is not, and the cost still grows with how far out the
+/// target sits; give such a search a `max_nodes` rather than letting it run.
 ///
 /// # Arguments
 /// * `v` - The target vector (should match the number of columns in the basis).
@@ -721,43 +830,126 @@ pub fn cvp_l1_top_k(
         return Ok((vec![], true));
     }
 
+    // In coordinate `j` a lattice point can only land on a multiple of the gcd of column `j`,
+    // so `floor[j]` is how far off the target it has to be there whatever the search does,
+    // and no lattice point scores better than `unavoidable`. A column of zeroes means the
+    // coordinate is out of reach entirely and its miss is the same for every lattice point.
+    let mut floor_dist = vec![0i64; m];
+    let mut reachable = vec![false; m];
+    for j in 0..m {
+        let step = basis.iter().fold(0i64, |g, row| gcd(g, row[j]));
+        reachable[j] = step != 0;
+        floor_dist[j] = if step == 0 {
+            v[j].checked_abs()
+                .ok_or(DiophantineError::Overflow("cvp_l1_top_k: target"))?
+        } else {
+            let rem = v[j].rem_euclid(step.abs());
+            rem.min(step.abs() - rem)
+        };
+    }
+    // All in the weighted norms the search works in, and in f64 because they only ever feed
+    // a radius. `unavoidable` is the weighted L1 of the misses and no point scores below it,
+    // `reach_floor_sq` and `stuck_floor_sq` split their weighted squared L2 by whether the
+    // coordinate can be improved, and `worst_reach` is the largest weighted miss that can.
+    let weighted = |j: usize| weights[j] as f64 * floor_dist[j] as f64;
+    let weighted_sq = |j: usize| weighted(j).powi(2);
+    let unavoidable: f64 = (0..m).map(weighted).sum();
+    let reach_floor_sq: f64 = (0..m).filter(|&j| reachable[j]).map(weighted_sq).sum();
+    let stuck_floor_sq: f64 = (0..m).filter(|&j| !reachable[j]).map(weighted_sq).sum();
+    let worst_reach = (0..m)
+        .filter(|&j| reachable[j])
+        .map(weighted)
+        .fold(0.0, f64::max);
+
+    // Turns a weighted L1 score into the squared radius the enumeration prunes on, which it
+    // measures inside the span. Writing each coordinate's miss as its floor plus a surplus,
+    // the surpluses are non-negative, vanish where the coordinate is out of reach, and have
+    // weighted L1 at most `slack`, which caps both the sum of their squares and how much
+    // they can cross with the floors.
+    let in_span_radius = |l1: f64, outside: f64| {
+        let slack = (l1 - unavoidable).max(0.0);
+        let surplus = 2.0 * worst_reach * slack + slack * slack;
+
+        // An out-of-reach coordinate misses by the same amount for every lattice point, and
+        // the span cannot lean that way at all, so that miss is already part of the distance
+        // to the span: `stuck_floor_sq <= outside` holds exactly. Dropping the pair rather
+        // than subtracting keeps the result at the scale of what survives, which matters
+        // because both are enormous when the target is far off the span, where subtracting
+        // would leave nothing but rounding. Clamping covers that rounding in the near case.
+        let from_floors = reach_floor_sq + (stuck_floor_sq - outside).max(0.0) + surplus;
+
+        // The plain `L2 <= L1` route, for when the floors say nothing. This one does have to
+        // subtract, so give back the low bits it drops.
+        let lost = 8.0 * f64::EPSILON * (l1 * l1 + outside);
+        from_floors.min(l1 * l1 - outside + lost)
+    };
+
     let mut top = TopK::new(k);
     // How far the target is from the span, which the enumeration does not count but the L1
     // score does. Worked out once, the first time a lattice point comes back.
     let mut outside_dist: Option<f64> = None;
-    let complete = enumerate(v, basis, &w, f64::INFINITY, max_nodes, |_, x, _, proj| {
-        let mut l1: i64 = 0;
-        let mut l2: i64 = 0;
-        for j in 0..m {
-            let wd = v[j]
-                .checked_sub(x[j])
-                .and_then(|dj| dj.checked_mul(weights[j]))
-                .ok_or(DiophantineError::Overflow("cvp_l1_top_k: norm"))?;
-            l1 = wd
-                .checked_abs()
-                .and_then(|a| l1.checked_add(a))
-                .ok_or(DiophantineError::Overflow("cvp_l1_top_k: norm"))?;
-            l2 = wd
-                .checked_mul(wd)
-                .and_then(|s| l2.checked_add(s))
-                .ok_or(DiophantineError::Overflow("cvp_l1_top_k: norm"))?;
-        }
-        top.insert(x, (l1, l2));
+    // The k-th best score so far, which is what a branch has to beat, shared with the filter
+    let best_l1 = std::cell::Cell::new(f64::INFINITY);
 
-        // The weighted L2 norm is at most the weighted L1 norm, so `l1^2` bounds the whole
-        // squared distance of any point at least as good as the current k-th best, and what
-        // is left of it once the part outside the span is taken off bounds the part inside,
-        // which is what the enumeration measures.
-        let outside = *outside_dist.get_or_insert_with(|| {
-            let d: Vec<f64> = v
-                .iter()
-                .zip(proj)
-                .map(|(&vi, &pj)| vi as f64 - pj)
-                .collect();
-            quad_form(&d, &w)
-        });
-        Ok(top.radius_sq(|(l1, _)| (l1 as f64).powi(2) - outside))
-    })?;
+    // A branch is judged on the part of the target its remaining coefficients cannot reach.
+    // Since `w` is `diag(weights^2)`, scaling that residual by `w` gives a vector `u` with
+    // `|u_j| <= weights[j]` once divided through by its largest weighted coordinate, and `u`
+    // is orthogonal to everything the branch can still add. For any such `u` the weighted L1
+    // score of every point below is at least `<u, residual>`, which works out as the squared
+    // norm over that largest weighted coordinate. That beats reading the radius off the
+    // squared norm alone by the ratio between the residual's weighted L2 and L-infinity
+    // norms, up to a factor of `sqrt(m)` in radius.
+    let filter = |_k: usize, residual: &[f64], norm_sq: f64| {
+        let limit = best_l1.get();
+        if !limit.is_finite() {
+            return false;
+        }
+        let peak = (0..m)
+            .map(|j| (weights[j] as f64 * residual[j]).abs())
+            .fold(0.0, f64::max);
+        peak > 0.0 && norm_sq > with_tolerance(limit * peak)
+    };
+
+    let complete = enumerate_filtered(
+        v,
+        basis,
+        &w,
+        f64::INFINITY,
+        max_nodes,
+        filter,
+        |_, x, _, proj| {
+            let mut l1: i64 = 0;
+            let mut l2: i64 = 0;
+            for j in 0..m {
+                let wd = v[j]
+                    .checked_sub(x[j])
+                    .and_then(|dj| dj.checked_mul(weights[j]))
+                    .ok_or(DiophantineError::Overflow("cvp_l1_top_k: norm"))?;
+                l1 = wd
+                    .checked_abs()
+                    .and_then(|a| l1.checked_add(a))
+                    .ok_or(DiophantineError::Overflow("cvp_l1_top_k: norm"))?;
+                l2 = wd
+                    .checked_mul(wd)
+                    .and_then(|s| l2.checked_add(s))
+                    .ok_or(DiophantineError::Overflow("cvp_l1_top_k: norm"))?;
+            }
+            top.insert(x, (l1, l2));
+            best_l1.set(top.radius_sq(|(l1, _)| l1 as f64));
+
+            // What is left of the radius once the part outside the span is taken off bounds the
+            // part inside, which is what the enumeration measures.
+            let outside = *outside_dist.get_or_insert_with(|| {
+                let d: Vec<f64> = v
+                    .iter()
+                    .zip(proj)
+                    .map(|(&vi, &pj)| vi as f64 - pj)
+                    .collect();
+                quad_form(&d, &w)
+            });
+            Ok(top.radius_sq(|(l1, _)| in_span_radius(l1 as f64, outside)))
+        },
+    )?;
 
     Ok((top.into_vecs(), complete))
 }
@@ -1190,6 +1382,65 @@ mod tests {
     }
 
     #[test]
+    fn cvp_l1_far_outside_span() {
+        // The L1 search prunes on an L2 radius, and reading that radius off the score alone
+        // makes an out-of-span offset widen it without bound: the cost used to grow with the
+        // offset, 630k nodes at 1e5 and unfinished at 1e7. The lattice cannot move the last
+        // coordinate at all, so the whole of its miss is part of the distance to the span.
+        let basis = vec![vec![1, 0, 0], vec![0, 1, 0]];
+        for offset in [10i64, 1_000, 100_000, 10_000_000, 1_000_000_000] {
+            let target = vec![3, -2, offset];
+            let (res, complete) =
+                cvp_l1_top_k(&target, &basis, &[1, 1, 1], 3, Some(10_000)).unwrap();
+            assert!(complete, "offset {offset} did not finish");
+            assert_eq!(res[0], vec![3, -2, 0], "offset {offset}");
+            assert_eq!(res.len(), 3);
+        }
+
+        // Only reachable in steps of 4, so the target is 1 off in that coordinate whatever
+        // the search does, and the radius has to allow for it rather than assume 0
+        let coarse = vec![vec![4, 0], vec![0, 7]];
+        let (res, complete) = cvp_l1_top_k(&[9, 3], &coarse, &[1, 1], 1, None).unwrap();
+        assert!(complete);
+        assert_eq!(res[0], vec![8, 0]);
+    }
+
+    #[test]
+    fn nearest_plane_ties_are_not_shared_across_norms() {
+        // Rounding a coefficient can land on an exact tie, and the enumeration and
+        // `nearest_plane` split it differently. Both answers are Babai's, and equally good
+        // under the form the rounding used, but that says nothing about any other norm: here
+        // the two are the same distance away under L2 and are not under L1. So a budget that
+        // runs out is measured against where its own first descent lands, not against
+        // `nearest_plane`.
+        let basis = vec![
+            vec![-3, -14, -20, -9, 3],
+            vec![2, -12, -3, -13, 4],
+            vec![-20, 16, -17, -7, -4],
+            vec![-4, -13, -15, 9, 1],
+            vec![-6, -6, 1, -8, 2],
+        ];
+        let target = vec![-1, -69, -90, 17, -79];
+        let w = eye(5);
+        let reduced = lll(&basis, 0.99, &w).unwrap();
+
+        let babai = nearest_plane(&target, &reduced, &w).unwrap();
+        let (first, complete) = cvp_exact(&target, &reduced, &w, Some(0)).unwrap();
+        assert!(!complete);
+
+        let diff = |x: &[i64]| -> Vec<i64> { target.iter().zip(x).map(|(&t, &c)| t - c).collect() };
+        let l1 = |x: &[i64]| -> i64 { diff(x).iter().map(|e| e.abs()).sum() };
+
+        assert_ne!(first, babai, "expected the tie to split the two apart");
+        assert_eq!(
+            norm_sq(&diff(&first)),
+            norm_sq(&diff(&babai)),
+            "both are nearest plane points, so equally far under L2"
+        );
+        assert_ne!(l1(&first), l1(&babai), "and not equally far under L1");
+    }
+
+    #[test]
     fn budget_large_enough_is_exact() {
         // Given room to finish, a budgeted search says so and agrees with an unbudgeted one
         let basis = vec![vec![4, 1, 0], vec![1, 5, 1], vec![0, 1, 6]];
@@ -1486,7 +1737,11 @@ mod proptests {
             let dist = |x: &[i64]| -> i64 {
                 norm_sq(&target.iter().zip(x).map(|(&t, &c)| t - c).collect::<Vec<_>>())
             };
-            let babai = nearest_plane(&target, &reduced, &w).unwrap();
+            // What the first descent reaches on its own, which is where every budget starts.
+            // Compared against instead of `nearest_plane`: both compute the same thing, but
+            // an exact tie when rounding a coefficient can send them to different points,
+            // equally good under `w` and not necessarily under the L1 norm below.
+            let floor = &cvp_top_k(&target, &reduced, &w, 1, Some(0)).unwrap().0[0];
 
             let (res, complete) = cvp_top_k(&target, &reduced, &w, k, Some(max_nodes)).unwrap();
 
@@ -1500,7 +1755,7 @@ mod proptests {
             // Still ordered by distance, and still better than where the search started
             let dists: Vec<i64> = res.iter().map(|x| dist(x)).collect();
             prop_assert!(dists.windows(2).all(|d| d[0] <= d[1]), "not ordered by distance");
-            prop_assert!(dists[0] <= dist(&babai), "worse than nearest plane");
+            prop_assert!(dists[0] <= dist(floor), "more budget did worse than none");
 
             let exact = exhaustive(cvp_top_k(&target, &reduced, &w, k, None).unwrap());
             if complete {
@@ -1519,7 +1774,8 @@ mod proptests {
             prop_assert!(res.len() <= k);
             let l1s: Vec<i64> = res.iter().map(|x| l1(x)).collect();
             prop_assert!(l1s.windows(2).all(|d| d[0] <= d[1]), "not ordered by L1 distance");
-            prop_assert!(l1s[0] <= l1(&babai), "worse than nearest plane under L1");
+            let floor_l1 = &cvp_l1_top_k(&target, &reduced, &weights, 1, Some(0)).unwrap().0[0];
+            prop_assert!(l1s[0] <= l1(floor_l1), "more budget did worse than none");
             if complete {
                 let exact = exhaustive(cvp_l1_top_k(&target, &reduced, &weights, k, None).unwrap());
                 prop_assert_eq!(&res, &exact);
@@ -1583,6 +1839,26 @@ mod proptests {
                 dists(&near_res, &near),
                 dists(&far_res, &near),
                 "an offset out of the span changed how close the search got"
+            );
+
+            // Same for the L1 search, which reaches its radius by a longer route
+            let weights = vec![1; n + 1];
+            let (near_res, near_done) =
+                cvp_l1_top_k(&near, &reduced, &weights, k, budget).unwrap();
+            let (far_res, far_done) = cvp_l1_top_k(&far, &reduced, &weights, k, budget).unwrap();
+            prop_assert!(
+                near_done && far_done,
+                "an offset out of the span enlarged the L1 search"
+            );
+            let l1s = |res: &Matrix<i64>, v: &[i64]| -> Vec<i64> {
+                res.iter()
+                    .map(|x| v.iter().zip(x).map(|(&t, &c)| (t - c).abs()).sum())
+                    .collect::<Vec<i64>>()
+            };
+            prop_assert_eq!(
+                l1s(&near_res, &near),
+                l1s(&far_res, &near),
+                "an offset out of the span changed how close the L1 search got"
             );
         }
     }
