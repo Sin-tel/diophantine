@@ -232,6 +232,23 @@ fn with_tolerance(radius_sq: f64) -> f64 {
     radius_sq * (1.0 + 1e-9) + 1e-9
 }
 
+/// How far a squared Gram-Schmidt norm may fall below the squared norm of its own row before
+/// the row counts as linearly dependent on the earlier ones. Gram-Schmidt here is classical
+/// and in `f64`, so the computed norm of a dependent row is noise of relative size around
+/// `1e-16` times the conditioning; this leaves several orders of magnitude of headroom.
+const DEGENERATE_REL_EPS: f64 = 1e-12;
+
+/// How large the squared distance from a target to the span of a basis may be, relative to
+/// the squared norm of the target, and still count as the target lying in that span.
+const PROJECTION_EPS: f64 = 1e-12;
+
+/// How large the squared distance from a target to the span may grow before squared
+/// distances measured from the target stop being a usable way to rank lattice points.
+/// Integer coordinates and an integer form make those distances whole numbers, and an `f64`
+/// spaces whole numbers exactly one apart up to `2^52`, so below this they are still exact
+/// and ties between equidistant points are still ties.
+const EXACT_SCORE_LIMIT: f64 = (1u64 << 52) as f64;
+
 /// Compute d^T W d, without allocating.
 fn quad_form(d: &[f64], w: &Matrix<f64>) -> f64 {
     let mut res = 0.0;
@@ -263,27 +280,41 @@ fn check_dims(v: &[i64], basis: &Matrix<i64>, w: &Matrix<f64>) -> Result<(), Dio
 
 /// Schnorr-Euchner enumeration.
 ///
-/// Visits the vectors `x` of the lattice spanned by `basis` with `|v - x|^2_w <= radius_sq`
-/// (up to a small tolerance), in Schnorr-Euchner order: near first, but not sorted.
-/// `visit` gets the coefficients of `x`, `x` itself and `|v - x|^2_w` as computed during
-/// enumeration, and returns the squared radius to continue with: the same to go on,
-/// smaller to tighten, negative to stop.
+/// Distances here are measured from `p`, the projection of `v` onto the span of `basis`,
+/// rather than from `v` itself. The two differ by a fixed vector that no choice of
+/// coefficients can touch, and holding it out keeps every quantity the search compares at
+/// the scale of the distances that actually distinguish lattice points. A target far off the
+/// span would otherwise swamp them: once `|v - p|^2_w` passes the `f64` mantissa, the
+/// relative slack in `with_tolerance` opens the search out over a huge radius, and the sums
+/// being compared lose the low bits that tell candidates apart.
 ///
-/// The rows of `basis` must be linearly independent, and `w` must be definite on their
-/// span. The basis should be reduced for speed.
+/// Visits the vectors `x` of the lattice with `|p - x|^2_w <= radius_sq` (up to a small
+/// tolerance), in Schnorr-Euchner order: near first, but not sorted. `visit` gets the
+/// coefficients of `x`, `x` itself, `|p - x|^2_w` as computed during enumeration, and `p`,
+/// and returns the squared radius to continue with, measured the same way: the same to go
+/// on, smaller to tighten, negative to stop.
+///
+/// Stops early once `max_nodes` nodes of the search tree have been visited, except that the
+/// first lattice point is always reached, so `visit` is called at least once whenever the
+/// lattice is non-empty. Returns whether the search ran to completion: `false` means the
+/// budget ran out and points outside the visited part may have been missed.
+///
+/// `w` must be definite on the span of `basis`, and the rows of `basis` must be linearly
+/// independent; both are checked. The basis should be reduced for speed.
 pub(crate) fn enumerate<F>(
     v: &[i64],
     basis: &Matrix<i64>,
     w: &Matrix<f64>,
     radius_sq: f64,
+    max_nodes: Option<u64>,
     mut visit: F,
-) -> Result<(), DiophantineError>
+) -> Result<bool, DiophantineError>
 where
-    F: FnMut(&[i64], &[i64], f64) -> Result<f64, DiophantineError>,
+    F: FnMut(&[i64], &[i64], f64, &[f64]) -> Result<f64, DiophantineError>,
 {
     check_dims(v, basis, w)?;
     if radius_sq.is_nan() || radius_sq < 0.0 {
-        return Ok(());
+        return Ok(true);
     }
 
     let n = basis.len();
@@ -291,22 +322,9 @@ where
     let v_f64: Vec<f64> = v.iter().map(|&x| x as f64).collect();
 
     if n == 0 {
-        // The lattice is just the origin
-        let dist = quad_form(&v_f64, w);
-        if dist <= with_tolerance(radius_sq) {
-            visit(&[], &vec![0; m], dist)?;
-        }
-        return Ok(());
-    }
-
-    // Compute Gram-Schmidt orthogonalization
-    let ortho = gramschmidt(basis, w);
-
-    let mut b_star_norms = vec![0.0; n];
-    for i in 0..n {
-        let norm = inner_prod(&ortho[i], &ortho[i], w);
-        // Floor the norm at a small epsilon to avoid infinite loops on degenerate dimensions
-        b_star_norms[i] = if norm < 1e-9 { 1e-9 } else { norm };
+        // The lattice is just the origin, and so is the span it is measured in
+        visit(&[], &vec![0; m], 0.0, &vec![0.0; m])?;
+        return Ok(true);
     }
 
     // Cache floating point representation of the basis to avoid inner loop allocations
@@ -315,6 +333,28 @@ where
         for j in 0..m {
             basis_f64[i][j] = basis[i][j] as f64;
         }
+    }
+
+    // Compute Gram-Schmidt orthogonalization
+    let ortho = gramschmidt(basis, w);
+
+    // A Gram-Schmidt norm is what makes the distance grow as the search descends through its
+    // level, so a vanishing one lets the search wander that level for free. That happens
+    // exactly when the row is (numerically) in the span of the earlier ones, or when `w` is
+    // not definite on the span, both of which are preconditions rather than something to
+    // paper over: reject them instead of flooring the norm and enumerating forever.
+    let mut b_star_norms = vec![0.0; n];
+    for i in 0..n {
+        let norm = inner_prod(&ortho[i], &ortho[i], w);
+        let row_norm = inner_prod(&basis_f64[i], &basis_f64[i], w);
+        // Asked this way round so that a norm that does not compare at all fails too
+        let floor = DEGENERATE_REL_EPS * row_norm;
+        if !matches!(norm.partial_cmp(&floor), Some(std::cmp::Ordering::Greater)) {
+            return Err(DiophantineError::InvalidArgument(
+                "Basis rows must be linearly independent and w definite on their span".to_string(),
+            ));
+        }
+        b_star_norms[i] = norm;
     }
 
     // Compute GS mu coefficients
@@ -334,15 +374,23 @@ where
         theta[j] = num / b_star_norms[j];
     }
 
-    // The component of v outside the span of the lattice is shared by every lattice point,
-    // so it starts the partial distance stack.
+    // The projection of v onto the span, which is what the search measures distances from.
     let mut outside = v_f64.clone();
     for j in 0..n {
         vec_sub_assign(&mut outside, &ortho[j], theta[j]);
     }
-    let outside_dist = quad_form(&outside, w).max(0.0);
+    // Gram-Schmidt ran in f64, so a target that lies in the span still comes back with an
+    // out-of-span part, at the noise level of that pass. Reading it as real would leave the
+    // projection a hair off the integer point it should be, and distances computed from it a
+    // hair off each other, which is enough to break ties between equidistant lattice points
+    // differently for different bases. Below that level, take the target to be in the span.
+    let v_norm_sq = quad_form(&v_f64, w);
+    let projection: Vec<f64> = if quad_form(&outside, w) <= PROJECTION_EPS * v_norm_sq {
+        v_f64.clone()
+    } else {
+        v_f64.iter().zip(&outside).map(|(a, b)| a - b).collect()
+    };
 
-    // State setup
     let mut bound = with_tolerance(radius_sq);
 
     let mut x = vec![0i64; n];
@@ -362,11 +410,22 @@ where
     let y = c[k] - x[k] as f64;
     step[k] = if y >= 0.0 { 1 } else { -1 };
     d[k] = 1;
-    p[n] = outside_dist;
+    p[n] = 0.0;
     p[k] = p[k + 1] + y * y * b_star_norms[k];
+
+    // Nodes spent so far, and whether the first lattice point is in hand. The budget only
+    // applies from then on, so that a caller that asks for very little still gets the
+    // nearest plane point rather than nothing at all.
+    let mut nodes: u64 = 0;
+    let mut reached_leaf = false;
 
     // Depth-first search
     loop {
+        if reached_leaf && max_nodes.is_some_and(|max| nodes >= max) {
+            return Ok(false);
+        }
+        nodes += 1;
+
         if p[k] <= bound {
             if k == 0 {
                 // Reached a leaf node (a complete lattice point)
@@ -376,9 +435,10 @@ where
                         .and_then(|t| t.checked_add(partial[1][j]))
                         .ok_or(DiophantineError::Overflow("enumerate: lattice vector"))?;
                 }
-                let r = visit(&x, &point, p[0])?;
+                reached_leaf = true;
+                let r = visit(&x, &point, p[0], &projection)?;
                 if r.is_nan() || r < 0.0 {
-                    return Ok(());
+                    return Ok(true);
                 }
                 bound = with_tolerance(r);
             } else {
@@ -408,7 +468,7 @@ where
             // Prune current branch: step back up to level k + 1
             k += 1;
             if k == n {
-                return Ok(());
+                return Ok(true);
             }
         }
 
@@ -418,6 +478,30 @@ where
         d[k] += 1;
         let y = c[k] - x[k] as f64;
         p[k] = p[k + 1] + y * y * b_star_norms[k];
+    }
+}
+
+/// A score to rank lattice points by, carrying the squared radius that goes with it.
+///
+/// The two are the same distance seen from different places: `order` from the target, which
+/// is what callers asked to be close to, and `radius_sq` from its projection onto the span,
+/// which is what the enumeration measures and prunes against. Only `order` takes part in
+/// comparisons, so equal distances stay equal and [`TopK`] breaks the tie on the vector.
+#[derive(Clone, Copy)]
+struct Scored {
+    order: f64,
+    radius_sq: f64,
+}
+
+impl PartialEq for Scored {
+    fn eq(&self, other: &Self) -> bool {
+        self.order == other.order
+    }
+}
+
+impl PartialOrd for Scored {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        self.order.partial_cmp(&other.order)
     }
 }
 
@@ -464,85 +548,156 @@ impl<S: PartialOrd + Copy> TopK<S> {
     }
 }
 
-/// Exact Closest Vector Problem (CVP) using Schnorr-Euchner enumeration.
+/// Closest Vector Problem (CVP) using Schnorr-Euchner enumeration.
 ///
-/// Returns the exact closest vector in the lattice to the target vector `v`.
-/// Ties are broken by the vector itself (lexicographically smallest).
+/// Returns the closest vector in the lattice to the target vector `v`, and whether the
+/// search completed. If it did, the vector is exactly the closest one, with ties broken by
+/// the vector itself (lexicographically smallest); if `max_nodes` ran out first, it is the
+/// closest one found so far, which is never worse than [`nearest_plane`] would give.
+///
 /// For reasonable performance, `basis` MUST be highly reduced (e.g., LLL or BKZ) before calling.
 ///
 /// # Arguments
 /// * `v` - The target vector (should match the number of columns in the basis).
-/// * `basis` - The lattice basis (row vectors).
+/// * `basis` - The lattice basis (row vectors), linearly independent.
 /// * `w` - The metric quadratic form matrix (weights).
+/// * `max_nodes` - Search budget, see [`cvp_top_k`]. `None` searches until done.
 pub fn cvp_exact(
     v: &[i64],
     basis: &Matrix<i64>,
     w: &Matrix<f64>,
-) -> Result<Vec<i64>, DiophantineError> {
-    Ok(cvp_top_k(v, basis, w, 1)?.swap_remove(0))
+    max_nodes: Option<u64>,
+) -> Result<(Vec<i64>, bool), DiophantineError> {
+    let (mut vecs, complete) = cvp_top_k(v, basis, w, 1, max_nodes)?;
+    Ok((vecs.swap_remove(0), complete))
 }
 
 /// The `k` vectors of the lattice closest to the target `v` under the quadratic form `w`,
-/// closest first. Ties are broken by the vector itself (lexicographically smallest first),
-/// so the result does not depend on the choice of basis.
+/// closest first, and whether the search completed. Ties are broken by the vector itself
+/// (lexicographically smallest first), so a completed search does not depend on the choice
+/// of basis.
 ///
-/// Returns fewer than `k` vectors only if the basis is empty (the lattice is just the origin).
+/// The exception is a target whose distance to the span of `basis` is past what an `f64`
+/// holds exactly, around `2^52`, which needs a basis that does not span the whole space to
+/// arise at all. Ranking there is done from the projection of the target onto the span, so
+/// it stays correct between points at different distances but no longer separates points at
+/// equal ones reliably, and which of several equally close vectors comes back may depend on
+/// the basis.
+///
 /// For reasonable performance, `basis` should be reduced (e.g. LLL) under `w`, and `k` small.
+///
+/// # Search budget
+/// `max_nodes` caps the nodes of the enumeration tree the search may visit, which is what
+/// its running time is proportional to. `None` means no cap, and the result is then always
+/// exact. Otherwise the second return value says whether the tree was exhausted within the
+/// budget: `false` means the vectors are the best found so far rather than provably the
+/// closest, and fewer than `k` of them may be returned. The first lattice point is always
+/// reached, however small the budget, so at least one vector always comes back.
+///
+/// The budget is on work, not on quality, so which vectors a search that ran out returns
+/// depends on the basis. For an exact answer, retry with a larger budget.
 ///
 /// # Arguments
 /// * `v` - The target vector (should match the number of columns in the basis).
 /// * `basis` - The lattice basis (row vectors), linearly independent.
 /// * `w` - The metric quadratic form matrix (weights), definite on the span of `basis`.
 /// * `k` - The number of vectors to return.
+/// * `max_nodes` - Search budget, or `None` to search until done.
 pub fn cvp_top_k(
     v: &[i64],
     basis: &Matrix<i64>,
     w: &Matrix<f64>,
     k: usize,
-) -> Result<Matrix<i64>, DiophantineError> {
+    max_nodes: Option<u64>,
+) -> Result<(Matrix<i64>, bool), DiophantineError> {
     check_dims(v, basis, w)?;
     if k == 0 {
-        return Ok(vec![]);
+        return Ok((vec![], true));
     }
 
-    let mut top = TopK::new(k);
+    let mut top: TopK<Scored> = TopK::new(k);
     let mut diff = vec![0.0; v.len()];
-    enumerate(v, basis, w, f64::INFINITY, |_, x, _| {
-        for j in 0..v.len() {
-            let dj = v[j]
-                .checked_sub(x[j])
-                .ok_or(DiophantineError::Overflow("cvp_top_k: difference"))?;
-            diff[j] = dj as f64;
-        }
-        top.insert(x, quad_form(&diff, w));
-        Ok(top.radius_sq(|s| s))
-    })?;
 
-    Ok(top.into_vecs())
+    // Ranking by the squared distance to the target is exact, which is what makes ties
+    // between equidistant points break on the vector and so come out the same whatever the
+    // basis. That holds only while the distance stays inside the `f64` mantissa: a target
+    // far off the span pushes it past, and the part that tells lattice points apart is the
+    // first thing rounded away, leaving every candidate looking equally good. Past that,
+    // rank by the distance to the projection of the target instead, which is the same order
+    // measured from a point the lattice can actually reach, and so stays at the scale of the
+    // differences being ranked. Decided once, on the first point, and then kept.
+    let mut score_is_exact: Option<bool> = None;
+
+    let complete = enumerate(
+        v,
+        basis,
+        w,
+        f64::INFINITY,
+        max_nodes,
+        |_, x, dist_sq, proj| {
+            let exact = *score_is_exact.get_or_insert_with(|| {
+                let outside: Vec<f64> = v
+                    .iter()
+                    .zip(proj)
+                    .map(|(&vi, &pj)| vi as f64 - pj)
+                    .collect();
+                quad_form(&outside, w) < EXACT_SCORE_LIMIT
+            });
+
+            if exact {
+                for j in 0..v.len() {
+                    let dj = v[j]
+                        .checked_sub(x[j])
+                        .ok_or(DiophantineError::Overflow("cvp_top_k: difference"))?;
+                    diff[j] = dj as f64;
+                }
+            } else {
+                for j in 0..v.len() {
+                    diff[j] = proj[j] - x[j] as f64;
+                }
+            }
+
+            top.insert(
+                x,
+                Scored {
+                    order: quad_form(&diff, w),
+                    radius_sq: dist_sq,
+                },
+            );
+            Ok(top.radius_sq(|s| s.radius_sq))
+        },
+    )?;
+
+    Ok((top.into_vecs(), complete))
 }
 
 /// The `k` vectors `x` of the lattice for which `v - x` is smallest under the weighted
 /// L1 norm `sum weights[i] * |(v - x)[i]|`, best first. Ties are broken by the weighted
 /// L2 norm `sum (weights[i] * (v - x)[i])^2`, then by `x` itself (lexicographically smallest
-/// first), so the result does not depend on the choice of basis.
+/// first), so a completed search does not depend on the choice of basis.
 ///
 /// Weights must be non-negative and may be zero, as long as no nonzero lattice vector has
 /// zero weighted norm. For reasonable performance, `basis` should be reduced (e.g. LLL)
 /// under `diag(weights^2)`, and `k` small.
 ///
-/// Returns fewer than `k` vectors only if the basis is empty (the lattice is just the origin).
+/// Returns whether the search completed as well; see [`cvp_top_k`] for what `max_nodes`
+/// does and what an incomplete search means. Note that this enumerates an L2 ball wide
+/// enough to hold the L1 ball, so it visits many more nodes than [`cvp_top_k`] does at the
+/// same dimension, and a budget bites correspondingly sooner.
 ///
 /// # Arguments
 /// * `v` - The target vector (should match the number of columns in the basis).
 /// * `basis` - The lattice basis (row vectors), linearly independent.
 /// * `weights` - The weight of each coordinate.
 /// * `k` - The number of vectors to return.
+/// * `max_nodes` - Search budget, or `None` to search until done.
 pub fn cvp_l1_top_k(
     v: &[i64],
     basis: &Matrix<i64>,
     weights: &[i64],
     k: usize,
-) -> Result<Matrix<i64>, DiophantineError> {
+    max_nodes: Option<u64>,
+) -> Result<(Matrix<i64>, bool), DiophantineError> {
     let m = v.len();
     if weights.len() != m {
         return Err(DiophantineError::InvalidDimensions(
@@ -563,11 +718,14 @@ pub fn cvp_l1_top_k(
     }
     check_dims(v, basis, &w)?;
     if k == 0 {
-        return Ok(vec![]);
+        return Ok((vec![], true));
     }
 
     let mut top = TopK::new(k);
-    enumerate(v, basis, &w, f64::INFINITY, |_, x, _| {
+    // How far the target is from the span, which the enumeration does not count but the L1
+    // score does. Worked out once, the first time a lattice point comes back.
+    let mut outside_dist: Option<f64> = None;
+    let complete = enumerate(v, basis, &w, f64::INFINITY, max_nodes, |_, x, _, proj| {
         let mut l1: i64 = 0;
         let mut l2: i64 = 0;
         for j in 0..m {
@@ -585,40 +743,82 @@ pub fn cvp_l1_top_k(
                 .ok_or(DiophantineError::Overflow("cvp_l1_top_k: norm"))?;
         }
         top.insert(x, (l1, l2));
-        Ok(top.radius_sq(|(l1, _)| (l1 as f64).powi(2)))
+
+        // The weighted L2 norm is at most the weighted L1 norm, so `l1^2` bounds the whole
+        // squared distance of any point at least as good as the current k-th best, and what
+        // is left of it once the part outside the span is taken off bounds the part inside,
+        // which is what the enumeration measures.
+        let outside = *outside_dist.get_or_insert_with(|| {
+            let d: Vec<f64> = v
+                .iter()
+                .zip(proj)
+                .map(|(&vi, &pj)| vi as f64 - pj)
+                .collect();
+            quad_form(&d, &w)
+        });
+        Ok(top.radius_sq(|(l1, _)| (l1 as f64).powi(2) - outside))
     })?;
 
-    Ok(top.into_vecs())
+    Ok((top.into_vecs(), complete))
 }
 
-/// Exact Shortest Vector Problem (SVP) using Schnorr-Euchner enumeration.
+/// Shortest Vector Problem (SVP) using Schnorr-Euchner enumeration.
 ///
-/// Returns the exact shortest **non-zero** vector in the lattice.
-/// Ties are broken by the vector itself (lexicographically smallest).
+/// Returns the shortest **non-zero** vector in the lattice, and whether the search
+/// completed. If it did, the vector is exactly the shortest one, with ties broken by the
+/// vector itself (lexicographically smallest); if `max_nodes` ran out first, it is the
+/// shortest one found so far, which is never worse than the shortest row of `basis`.
+///
 /// For reasonable performance, `basis` MUST be highly reduced (e.g., LLL or BKZ) before calling.
 ///
 /// # Arguments
-/// * `basis` - The lattice basis (row vectors).
+/// * `basis` - The lattice basis (row vectors), linearly independent.
 /// * `w` - The metric quadratic form matrix (weights).
-pub fn svp_exact(basis: &Matrix<i64>, w: &Matrix<f64>) -> Result<Vec<i64>, DiophantineError> {
+/// * `max_nodes` - Search budget, see [`cvp_top_k`]. `None` searches until done.
+pub fn svp_exact(
+    basis: &Matrix<i64>,
+    w: &Matrix<f64>,
+    max_nodes: Option<u64>,
+) -> Result<(Vec<i64>, bool), DiophantineError> {
     let Some(first) = basis.first() else {
-        return Ok(vec![]);
+        return Ok((vec![], true));
     };
-    let origin = vec![0; first.len()];
+    let m = first.len();
+    let origin = vec![0; m];
+    check_dims(&origin, basis, w)?;
 
     let mut top = TopK::new(1);
-    let mut x_f64 = vec![0.0; origin.len()];
-    enumerate(&origin, basis, w, f64::INFINITY, |coeffs, x, _| {
-        if coeffs.iter().any(|&c| c != 0) {
-            for (xf, &xi) in x_f64.iter_mut().zip(x) {
-                *xf = xi as f64;
-            }
-            top.insert(x, quad_form(&x_f64, w));
-        }
-        Ok(top.radius_sq(|s| s))
-    })?;
+    let mut x_f64 = vec![0.0; m];
 
-    Ok(top.into_vecs().pop().unwrap_or_default())
+    // Seed with the shortest row. Unlike the CVP searches, the first lattice point the
+    // enumeration reaches is the origin, which is not a candidate, so without a seed a
+    // budget could run out leaving nothing to return. It also starts the search at a finite
+    // radius rather than an infinite one, which can only prune more.
+    for row in basis {
+        for (xf, &xi) in x_f64.iter_mut().zip(row) {
+            *xf = xi as f64;
+        }
+        top.insert(row, quad_form(&x_f64, w));
+    }
+
+    let complete = enumerate(
+        &origin,
+        basis,
+        w,
+        top.radius_sq(|s| s),
+        max_nodes,
+        |coeffs, x, _, _| {
+            if coeffs.iter().any(|&c| c != 0) {
+                for (xf, &xi) in x_f64.iter_mut().zip(x) {
+                    *xf = xi as f64;
+                }
+                top.insert(x, quad_form(&x_f64, w));
+            }
+            Ok(top.radius_sq(|s| s))
+        },
+    )?;
+
+    Ok((top.into_vecs().pop().unwrap_or_default(), complete))
 }
 
 #[cfg(test)]
@@ -628,6 +828,13 @@ mod tests {
 
     fn norm_sq(v: &[i64]) -> i64 {
         v.iter().map(|x| x * x).sum()
+    }
+
+    /// Unwraps the result of a search run without a budget, asserting that it completed.
+    #[track_caller]
+    fn exhaustive<T>((value, complete): (T, bool)) -> T {
+        assert!(complete, "a search without a budget must always complete");
+        value
     }
 
     #[test]
@@ -727,7 +934,7 @@ mod tests {
         ];
 
         let w = eye(4);
-        let sv = svp_exact(&basis, &w).unwrap();
+        let sv = exhaustive(svp_exact(&basis, &w, None).unwrap());
         assert!(sv == vec![1, -1, -1, 0] || sv == vec![-1, 1, 1, 0]);
     }
 
@@ -793,7 +1000,7 @@ mod tests {
     fn svp_identity() {
         let basis = vec![vec![1, 0], vec![0, 1]];
         let w = eye(2);
-        let sv = svp_exact(&basis, &w).unwrap();
+        let sv = exhaustive(svp_exact(&basis, &w, None).unwrap());
 
         let norm = norm_sq(&sv);
         assert_eq!(norm, 1, "Shortest vector in Z^2 should have norm 1");
@@ -805,7 +1012,7 @@ mod tests {
         let basis = vec![vec![1, 13, 14], vec![0, 12, 13]];
         let w = eye(3);
 
-        let sv = svp_exact(&basis, &w).unwrap();
+        let sv = exhaustive(svp_exact(&basis, &w, None).unwrap());
 
         // Should be [1, 1, 1]
         assert_eq!(norm_sq(&sv), 3);
@@ -818,7 +1025,7 @@ mod tests {
         let w = eye(2);
         let target = vec![4, 6];
 
-        let closest = cvp_exact(&target, &basis, &w).unwrap();
+        let closest = exhaustive(cvp_exact(&target, &basis, &w, None).unwrap());
         assert_eq!(closest, vec![4, 6]);
     }
 
@@ -829,7 +1036,7 @@ mod tests {
 
         // Target is directly in the middle of a 2x2 square cell [2, 0] to [4, 2]
         let target = vec![3, 1];
-        let closest = cvp_exact(&target, &basis, &w).unwrap();
+        let closest = exhaustive(cvp_exact(&target, &basis, &w, None).unwrap());
 
         // Distance from [3, 1] to any corner of its cell ([2,0], [4,0], [2,2], [4,2]) is exactly 2.
         let dist = norm_sq(&[closest[0] - target[0], closest[1] - target[1]]);
@@ -843,9 +1050,12 @@ mod tests {
         let target = vec![1, 1];
         let expected = vec![vec![0, 0], vec![0, 2], vec![2, 0], vec![2, 2]];
 
-        assert_eq!(cvp_top_k(&target, &basis, &eye(2), 4).unwrap(), expected);
-        assert_eq!(cvp_l1_top_k(&target, &basis, &[1, 1], 4).unwrap(), expected);
-        assert_eq!(cvp_exact(&target, &basis, &eye(2)).unwrap(), vec![0, 0]);
+        let top_k = exhaustive(cvp_top_k(&target, &basis, &eye(2), 4, None).unwrap());
+        assert_eq!(top_k, expected);
+        let top_k_l1 = exhaustive(cvp_l1_top_k(&target, &basis, &[1, 1], 4, None).unwrap());
+        assert_eq!(top_k_l1, expected);
+        let closest = exhaustive(cvp_exact(&target, &basis, &eye(2), None).unwrap());
+        assert_eq!(closest, vec![0, 0]);
     }
 
     #[test]
@@ -854,9 +1064,9 @@ mod tests {
         // L1 distances 3 and 4, but L2 distances 9 and 8.
         let basis = vec![vec![1, -2]];
         let target = vec![3, 0];
-        let res = cvp_l1_top_k(&target, &basis, &[1, 1], 2).unwrap();
+        let res = exhaustive(cvp_l1_top_k(&target, &basis, &[1, 1], 2, None).unwrap());
         assert_eq!(res, vec![vec![0, 0], vec![1, -2]]);
-        let res = cvp_top_k(&target, &basis, &eye(2), 2).unwrap();
+        let res = exhaustive(cvp_top_k(&target, &basis, &eye(2), 2, None).unwrap());
         assert_eq!(res, vec![vec![1, -2], vec![0, 0]]);
     }
 
@@ -865,10 +1075,10 @@ mod tests {
         // Lattice spanned by (1, 0, 0) and (0, 1, 0), target off the plane
         let basis = vec![vec![1, 0, 0], vec![0, 1, 0]];
         let target = vec![3, -2, 7];
-        let res = cvp_top_k(&target, &basis, &eye(3), 5).unwrap();
+        let res = exhaustive(cvp_top_k(&target, &basis, &eye(3), 5, None).unwrap());
         assert_eq!(res[0], vec![3, -2, 0]);
         assert_eq!(res.len(), 5);
-        let res = cvp_l1_top_k(&target, &basis, &[1, 1, 1], 5).unwrap();
+        let res = exhaustive(cvp_l1_top_k(&target, &basis, &[1, 1, 1], 5, None).unwrap());
         assert_eq!(res[0], vec![3, -2, 0]);
         assert_eq!(res.len(), 5);
     }
@@ -878,7 +1088,7 @@ mod tests {
         // Vectors (a, a + b, b): only zero has zero weight under (0, 1, 2)
         let basis = vec![vec![1, 1, 0], vec![0, 1, 1]];
         let target = vec![10, 3, 1];
-        let res = cvp_l1_top_k(&target, &basis, &[0, 1, 2], 3).unwrap();
+        let res = exhaustive(cvp_l1_top_k(&target, &basis, &[0, 1, 2], 3, None).unwrap());
         // (2, 3, 1) is a lattice point with weighted distance 0
         assert_eq!(res[0], vec![2, 3, 1]);
         assert_eq!(res.len(), 3);
@@ -888,50 +1098,180 @@ mod tests {
     fn top_k_edge_cases() {
         let basis = vec![vec![1, 0], vec![0, 1]];
         let target = vec![1, 2];
-        assert!(cvp_top_k(&target, &basis, &eye(2), 0).unwrap().is_empty());
-        assert!(
-            cvp_l1_top_k(&target, &basis, &[1, 1], 0)
-                .unwrap()
-                .is_empty()
-        );
+        assert!(exhaustive(cvp_top_k(&target, &basis, &eye(2), 0, None).unwrap()).is_empty());
+        assert!(exhaustive(cvp_l1_top_k(&target, &basis, &[1, 1], 0, None).unwrap()).is_empty());
 
         // Rank 0: the lattice is just the origin
         let empty: Matrix<i64> = vec![];
         assert_eq!(
-            cvp_top_k(&target, &empty, &eye(2), 3).unwrap(),
+            exhaustive(cvp_top_k(&target, &empty, &eye(2), 3, None).unwrap()),
             vec![vec![0, 0]]
         );
         assert_eq!(
-            cvp_l1_top_k(&target, &empty, &[1, 1], 3).unwrap(),
+            exhaustive(cvp_l1_top_k(&target, &empty, &[1, 1], 3, None).unwrap()),
             vec![vec![0, 0]]
         );
-        assert_eq!(cvp_exact(&target, &empty, &eye(2)).unwrap(), vec![0, 0]);
+        let closest = exhaustive(cvp_exact(&target, &empty, &eye(2), None).unwrap());
+        assert_eq!(closest, vec![0, 0]);
 
         // Rank 1, many more points than a small box
         let line = vec![vec![1, 1]];
-        let res = cvp_top_k(&[0, 0], &line, &eye(2), 7).unwrap();
+        let res = exhaustive(cvp_top_k(&[0, 0], &line, &eye(2), 7, None).unwrap());
         assert_eq!(res.len(), 7);
         assert_eq!(res[0], vec![0, 0]);
         assert_eq!(res[5], vec![-3, -3]);
         assert_eq!(res[6], vec![3, 3]);
 
-        let res = cvp_l1_top_k(&target, &basis, &[1, -1], 1);
+        let res = cvp_l1_top_k(&target, &basis, &[1, -1], 1, None);
         assert!(matches!(res, Err(DiophantineError::InvalidArgument(_))));
-        let res = cvp_l1_top_k(&target, &basis, &[1, 1, 1], 1);
+        let res = cvp_l1_top_k(&target, &basis, &[1, 1, 1], 1, None);
         assert!(matches!(res, Err(DiophantineError::InvalidDimensions(_))));
+    }
+
+    #[test]
+    fn cvp_far_outside_span() {
+        // The lattice spans the z = 0 plane and the target sits far off it. That distance is
+        // the same for every lattice point, so it should not reach the search at all: it used
+        // to scale the rounding tolerance with it, widening the search to an in-span radius of
+        // thousands, and to swamp the scores the candidates were ranked by.
+        let basis = vec![vec![1, 0, 0], vec![0, 1, 0]];
+        let target = vec![3, -2, 100_000_000];
+
+        let (closest, complete) = cvp_exact(&target, &basis, &eye(3), Some(10_000)).unwrap();
+        assert!(
+            complete,
+            "an out-of-span offset should not enlarge the search"
+        );
+        assert_eq!(closest, vec![3, -2, 0]);
+
+        // The point under the target first, then its four neighbours ordered by vector
+        let (res, complete) = cvp_top_k(&target, &basis, &eye(3), 5, Some(10_000)).unwrap();
+        assert!(complete);
+        assert_eq!(
+            res,
+            vec![
+                vec![3, -2, 0],
+                vec![2, -2, 0],
+                vec![3, -3, 0],
+                vec![3, -1, 0],
+                vec![4, -2, 0],
+            ]
+        );
+    }
+
+    #[test]
+    fn budget_falls_back_to_nearest_plane() {
+        // The first lattice point is always reached, so even a budget of nothing comes back
+        // with the point Babai's nearest plane would give, and says it did not finish.
+        let basis = vec![vec![2, 0], vec![0, 2]];
+        let w = eye(2);
+        let target = vec![5, 7];
+        let babai = nearest_plane(&target, &basis, &w).unwrap();
+
+        let (closest, complete) = cvp_exact(&target, &basis, &w, Some(0)).unwrap();
+        assert!(!complete);
+        assert_eq!(closest, babai);
+
+        // Asking for more than the budget can find returns what it did find, not nothing
+        let (res, complete) = cvp_top_k(&target, &basis, &w, 4, Some(0)).unwrap();
+        assert!(!complete);
+        assert_eq!(res, vec![babai.clone()]);
+
+        let (res, complete) = cvp_l1_top_k(&target, &basis, &[1, 1], 4, Some(0)).unwrap();
+        assert!(!complete);
+        assert_eq!(res, vec![babai]);
+
+        // The origin is the first point an SVP search reaches and is not a candidate, so the
+        // shortest row stands in for it
+        let skew = vec![vec![3, 4], vec![1, 0]];
+        let (short, complete) = svp_exact(&skew, &w, Some(0)).unwrap();
+        assert!(!complete);
+        assert_eq!(short, vec![1, 0]);
+    }
+
+    #[test]
+    fn budget_large_enough_is_exact() {
+        // Given room to finish, a budgeted search says so and agrees with an unbudgeted one
+        let basis = vec![vec![4, 1, 0], vec![1, 5, 1], vec![0, 1, 6]];
+        let w = eye(3);
+        let target = vec![17, -23, 9];
+
+        for k in [1usize, 3, 8] {
+            let (bounded, complete) = cvp_top_k(&target, &basis, &w, k, Some(1_000_000)).unwrap();
+            assert!(complete);
+            assert_eq!(
+                bounded,
+                exhaustive(cvp_top_k(&target, &basis, &w, k, None).unwrap())
+            );
+
+            let (bounded, complete) =
+                cvp_l1_top_k(&target, &basis, &[1, 1, 1], k, Some(1_000_000)).unwrap();
+            assert!(complete);
+            assert_eq!(
+                bounded,
+                exhaustive(cvp_l1_top_k(&target, &basis, &[1, 1, 1], k, None).unwrap())
+            );
+        }
+
+        let (bounded, complete) = svp_exact(&basis, &w, Some(1_000_000)).unwrap();
+        assert!(complete);
+        assert_eq!(bounded, exhaustive(svp_exact(&basis, &w, None).unwrap()));
+    }
+
+    #[test]
+    fn dependent_rows_rejected() {
+        // A Gram-Schmidt norm of zero gives the search a level it can wander for free, so the
+        // rows have to be independent rather than merely documented as such.
+        let w = eye(3);
+        let dependent = vec![vec![1, 2, 0], vec![0, 1, 1], vec![1, 3, 1]];
+        let target = vec![4, 5, 6];
+
+        fn is_bad<T>(e: Result<T, DiophantineError>) -> bool {
+            matches!(e, Err(DiophantineError::InvalidArgument(_)))
+        }
+        assert!(is_bad(cvp_exact(&target, &dependent, &w, None)));
+        assert!(is_bad(cvp_top_k(&target, &dependent, &w, 2, None)));
+        assert!(is_bad(cvp_l1_top_k(
+            &target,
+            &dependent,
+            &[1, 1, 1],
+            2,
+            None
+        )));
+        assert!(is_bad(svp_exact(&dependent, &w, None)));
+
+        // A repeated row, and a row that is zero
+        assert!(is_bad(svp_exact(
+            &vec![vec![1, 2, 3], vec![1, 2, 3]],
+            &w,
+            None
+        )));
+        assert!(is_bad(svp_exact(
+            &vec![vec![1, 2, 3], vec![0, 0, 0]],
+            &w,
+            None
+        )));
+
+        // The same rows scaled up, in case the test is reading an absolute size
+        let big = vec![
+            vec![100_000, 200_000, 0],
+            vec![0, 1, 1],
+            vec![100_000, 200_001, 1],
+        ];
+        assert!(is_bad(svp_exact(&big, &w, None)));
     }
 
     #[test]
     fn svp_cvp_dims() {
         let basis = vec![vec![1, 0], vec![0, 1], vec![0, 1]];
         let w = eye(3);
-        let res = svp_exact(&basis, &w);
+        let res = svp_exact(&basis, &w, None);
         assert!(matches!(res, Err(DiophantineError::InvalidDimensions(_))));
 
         let target = vec![1, 2, 3, 4];
         let basis = eye(3);
         let w = eye(3);
-        let res = cvp_exact(&target, &basis, &w);
+        let res = cvp_exact(&target, &basis, &w, None);
         assert!(matches!(res, Err(DiophantineError::InvalidDimensions(_))));
     }
 }
@@ -944,6 +1284,13 @@ mod proptests {
 
     fn norm_sq(v: &[i64]) -> i64 {
         v.iter().map(|x| x * x).sum()
+    }
+
+    /// Unwraps the result of a search run without a budget, asserting that it completed.
+    #[track_caller]
+    fn exhaustive<T>((value, complete): (T, bool)) -> T {
+        assert!(complete, "a search without a budget must always complete");
+        value
     }
 
     /// Whether `x` is an integer combination of the rows of the square, nonsingular `basis`.
@@ -1089,11 +1436,11 @@ mod proptests {
             let reduced = lll(&basis, 0.99, &w).unwrap();
 
             for b in [&basis, &reduced] {
-                let res = cvp_top_k(&target, b, &w, k).unwrap();
+                let res = exhaustive(cvp_top_k(&target, b, &w, k, None).unwrap());
                 let brute = bruteforce_top_k(&basis, m, &center, 4, &res, k, l2);
                 prop_assert_eq!(&res, &brute, "L2 top-k differs from brute force");
 
-                let res = cvp_l1_top_k(&target, b, &weights, k).unwrap();
+                let res = exhaustive(cvp_l1_top_k(&target, b, &weights, k, None).unwrap());
                 let brute = bruteforce_top_k(&basis, m, &center, 4, &res, k, l1);
                 prop_assert_eq!(&res, &brute, "L1 top-k differs from brute force");
             }
@@ -1108,16 +1455,134 @@ mod proptests {
             let reduced = lll(&basis, 0.99, &w).unwrap();
 
             prop_assert_eq!(
-                cvp_top_k(&target, &basis, &w, k).unwrap(),
-                cvp_top_k(&target, &reduced, &w, k).unwrap()
+                exhaustive(cvp_top_k(&target, &basis, &w, k, None).unwrap()),
+                exhaustive(cvp_top_k(&target, &reduced, &w, k, None).unwrap())
             );
             prop_assert_eq!(
-                cvp_l1_top_k(&target, &basis, &weights, k).unwrap(),
-                cvp_l1_top_k(&target, &reduced, &weights, k).unwrap()
+                exhaustive(cvp_l1_top_k(&target, &basis, &weights, k, None).unwrap()),
+                exhaustive(cvp_l1_top_k(&target, &reduced, &weights, k, None).unwrap())
             );
             prop_assert_eq!(
-                cvp_top_k(&target, &reduced, &w, 1).unwrap()[0].clone(),
-                cvp_exact(&target, &reduced, &w).unwrap()
+                exhaustive(cvp_top_k(&target, &reduced, &w, 1, None).unwrap())[0].clone(),
+                exhaustive(cvp_exact(&target, &reduced, &w, None).unwrap())
+            );
+        }
+
+        /// Whatever the budget, a search comes back with lattice points, ranked, no worse
+        /// than the nearest plane, and equal to the unbudgeted answer when it says it
+        /// finished.
+        #[test]
+        fn test_budget_properties(
+            (basis, target) in random_basis_target(),
+            k in 1usize..=6,
+            max_nodes in 0u64..60,
+        ) {
+            prop_assume!(integer_det(&basis).unwrap_or(0) != 0);
+            let n = basis.len();
+            let w = eye(n);
+            let weights = vec![1; n];
+            let reduced = lll(&basis, 0.99, &w).unwrap();
+
+            let dist = |x: &[i64]| -> i64 {
+                norm_sq(&target.iter().zip(x).map(|(&t, &c)| t - c).collect::<Vec<_>>())
+            };
+            let babai = nearest_plane(&target, &reduced, &w).unwrap();
+
+            let (res, complete) = cvp_top_k(&target, &reduced, &w, k, Some(max_nodes)).unwrap();
+
+            // The first lattice point is always reached, and no more than k are kept
+            prop_assert!(!res.is_empty(), "a budgeted search returned nothing");
+            prop_assert!(res.len() <= k);
+
+            for x in &res {
+                prop_assert!(in_lattice(x, &reduced), "not a lattice point");
+            }
+            // Still ordered by distance, and still better than where the search started
+            let dists: Vec<i64> = res.iter().map(|x| dist(x)).collect();
+            prop_assert!(dists.windows(2).all(|d| d[0] <= d[1]), "not ordered by distance");
+            prop_assert!(dists[0] <= dist(&babai), "worse than nearest plane");
+
+            let exact = exhaustive(cvp_top_k(&target, &reduced, &w, k, None).unwrap());
+            if complete {
+                prop_assert_eq!(&res, &exact, "a finished search should be the exact answer");
+            }
+            // Running out of budget can only cost quality, never improve on the exact answer
+            prop_assert!(dist(&exact[0]) <= dists[0]);
+
+            // The L1 search keeps the same guarantees under its own norm
+            let l1 = |x: &[i64]| -> i64 {
+                target.iter().zip(x).map(|(&t, &c)| (t - c).abs()).sum()
+            };
+            let (res, complete) =
+                cvp_l1_top_k(&target, &reduced, &weights, k, Some(max_nodes)).unwrap();
+            prop_assert!(!res.is_empty());
+            prop_assert!(res.len() <= k);
+            let l1s: Vec<i64> = res.iter().map(|x| l1(x)).collect();
+            prop_assert!(l1s.windows(2).all(|d| d[0] <= d[1]), "not ordered by L1 distance");
+            prop_assert!(l1s[0] <= l1(&babai), "worse than nearest plane under L1");
+            if complete {
+                let exact = exhaustive(cvp_l1_top_k(&target, &reduced, &weights, k, None).unwrap());
+                prop_assert_eq!(&res, &exact);
+            }
+
+            // An SVP search always has a nonzero vector to fall back on
+            let (short, complete) = svp_exact(&reduced, &w, Some(max_nodes)).unwrap();
+            prop_assert!(short.iter().any(|&x| x != 0), "SVP returned the zero vector");
+            prop_assert!(in_lattice(&short, &reduced));
+            prop_assert!(norm_sq(&short) <= norm_sq(&reduced[0]), "worse than the shortest row");
+            if complete {
+                prop_assert_eq!(&short, &exhaustive(svp_exact(&reduced, &w, None).unwrap()));
+            }
+        }
+
+        /// How far a target is from the span of the lattice is the same for every lattice
+        /// point, so however large it grows it should change neither the answer nor the work
+        /// needed to find it.
+        #[test]
+        fn test_out_of_span_offset_is_free(
+            (basis, target) in random_basis_target(),
+            offset in 1i64..1_000_000_000,
+            k in 1usize..=4,
+        ) {
+            prop_assume!(integer_det(&basis).unwrap_or(0) != 0);
+            let n = basis.len();
+            let w = eye(n + 1);
+
+            // Lift into one more dimension, which the lattice does not reach into, so that
+            // the last coordinate of the target is purely outside the span
+            let lifted: Matrix<i64> = basis
+                .iter()
+                .map(|row| row.iter().copied().chain([0]).collect())
+                .collect();
+            let reduced = lll(&lifted, 0.99, &w).unwrap();
+
+            let near: Vec<i64> = target.iter().copied().chain([0]).collect();
+            let far: Vec<i64> = target.iter().copied().chain([offset]).collect();
+
+            // Enough to finish either search many times over if the offset stays out of it
+            let budget = Some(100_000);
+            let (near_res, near_done) = cvp_top_k(&near, &reduced, &w, k, budget).unwrap();
+            let (far_res, far_done) = cvp_top_k(&far, &reduced, &w, k, budget).unwrap();
+
+            prop_assert!(near_done && far_done, "an offset out of the span enlarged the search");
+
+            // Compared by distance rather than by vector: past the point where squared
+            // distances to the target stay exact, the search ranks by distances to its
+            // projection instead, and equidistant points no longer tie exactly enough for
+            // the tie to break the same way. Which of them comes back may differ; how good
+            // it is may not.
+            let dists = |res: &Matrix<i64>, v: &[i64]| -> Vec<i64> {
+                res.iter()
+                    .map(|x| norm_sq(&v.iter().zip(x).map(|(&t, &c)| t - c).collect::<Vec<_>>()))
+                    .collect()
+            };
+            // Both measured against the target without the offset. Every lattice point is
+            // the same amount further from the target with it, so the two are the same
+            // comparison, but this one is not dominated by that shared amount.
+            prop_assert_eq!(
+                dists(&near_res, &near),
+                dists(&far_res, &near),
+                "an offset out of the span changed how close the search got"
             );
         }
     }
@@ -1215,7 +1680,7 @@ mod proptests {
 
             // LLL-reduce first
             let reduced = lll(&basis, 0.99, &w).unwrap();
-            let svp_res = svp_exact(&reduced, &w).unwrap();
+            let svp_res = exhaustive(svp_exact(&reduced, &w, None).unwrap());
 
             // Result must be non-zero
             prop_assert!(svp_res.iter().any(|&x| x != 0), "SVP exact returned the zero vector!");
@@ -1255,7 +1720,7 @@ mod proptests {
             // Perform CVP on a reduced basis
             let reduced = lll(&basis, 0.99, &w).unwrap();
 
-            let cvp_res = cvp_exact(&target, &reduced, &w).unwrap();
+            let cvp_res = exhaustive(cvp_exact(&target, &reduced, &w, None).unwrap());
             let babai_res = nearest_plane(&target, &reduced, &w).unwrap();
 
             let error_cvp: Vec<i64> = target.iter().zip(cvp_res.iter()).map(|(&t, &c)| t - c).collect();

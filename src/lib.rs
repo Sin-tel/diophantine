@@ -11,7 +11,9 @@
 //! * Lattice reduction: Lenstra–Lenstra–Lovász (LLL) basis reduction.
 //! * Closest Vector Problem (CVP): Babai's Nearest Plane algorithm for approximate CVP,
 //!   and exact Schnorr-Euchner enumeration for CVP, SVP and the `k` closest vectors,
-//!   under a quadratic form or a weighted L1 norm.
+//!   under a quadratic form or a weighted L1 norm. The enumeration takes a search budget,
+//!   so that a hard instance gives up and returns its best answer so far rather than
+//!   running on.
 //! * Nullspaces: Compute exact left and right integer kernels of matrices.
 //!
 //! # Example: Solving a system of linear Diophantine equations
